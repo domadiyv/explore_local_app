@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Estate Ledger</title>
+<meta name="description" content="Offline real estate, rental and partnership ledger. All data stays on your device.">
+<meta name="theme-color" content="#0f766e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Estate Ledger">
+<meta name="format-detection" content="telephone=no">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<header class="topbar">
+  <button class="back" id="backBtn" aria-label="Back" hidden>&#x2039; Back</button>
+  <h1 id="title">Estate Ledger</h1>
+  <div class="top-actions" id="topActions"></div>
+</header>
+<main id="main"><p class="empty">Loading…</p></main>
+<button class="fab" id="fab" aria-label="Add transaction">+</button>
+<nav class="tabbar">
+  <a href="#/home" data-tab="home"><span class="ti">&#x2302;</span>Home</a>
+  <a href="#/properties" data-tab="properties"><span class="ti">&#x25A6;</span>Properties</a>
+  <a href="#/rentals" data-tab="rentals"><span class="ti">&#x1F511;&#xFE0E;</span>Rentals</a>
+  <a href="#/ledger" data-tab="ledger"><span class="ti">&#x2261;</span>Ledger</a>
+  <a href="#/more" data-tab="more"><span class="ti">&#x22EF;</span>More</a>
+</nav>
+<div class="sheet-backdrop" id="sheetBackdrop" hidden>
+  <div class="sheet" role="dialog" aria-modal="true">
+    <div class="sheet-head"><button class="link" id="sheetClose">Cancel</button><h2 id="sheetTitle"></h2><span class="sheet-spacer"></span></div>
+    <div class="sheet-body" id="sheetBody"></div>
+  </div>
+</div>
+<div class="toast" id="toast" hidden></div>
+<script src="js/db.js"></script>
+<script src="js/zip.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
