@@ -566,8 +566,8 @@ async function shareBlob(blob, filename) {
   return true;
 }
 // Two-step delivery so the share sheet is opened directly from a tap (required by iOS).
-function offerFile(blob, filename, onDone) {
-  openSheet('File ready', `<div class="card pad" style="margin:0 0 14px"><div class="t" style="font-weight:600;word-break:break-all">${esc(filename)}</div><div class="small muted">${fmtSize(blob.size)}</div></div>
+function offerFile(blob, filename, onDone, note) {
+  openSheet('File ready', `<div class="card pad" style="margin:0 0 14px"><div class="t" style="font-weight:600;word-break:break-all">${esc(filename)}</div><div class="small muted">${fmtSize(blob.size)}</div>${note ? `<div class="small pos" style="margin-top:4px">${esc(note)}</div>` : ''}</div>
     <button class="btn block" id="doShare">Share / Save to Files</button>
     <div class="hint" style="margin-top:10px">In the share sheet choose <b>Save to Files</b> (On My iPhone or iCloud Drive), AirDrop, Mail, WhatsApp, etc.</div>`, (b) => {
     $('#doShare', b).onclick = async () => { const ok = await shareBlob(blob, filename); if (ok) { if (onDone) onDone(); closeSheet(); } };
@@ -1107,9 +1107,11 @@ function backupBanner() {
   const hasData = S.properties.length || S.txns.length;
   const st = S.settings;
   if (!hasData) return '';
-  if (st.lastBackupAt && (!st.lastChangeAt || st.lastChangeAt <= st.lastBackupAt || daysSince(st.lastBackupAt) < 7)) return '';
-  const msg = st.lastBackupAt ? `Last backup ${Math.floor(daysSince(st.lastBackupAt))} days ago.` : 'You have not made a backup yet.';
-  return `<div class="banner"><div class="grow">${msg} Your data lives only on this iPhone — keep a copy in Files/iCloud.</div><a class="btn sm" href="#/data">Back up</a></div>`;
+  const wait = { changes: 0, daily: 1, weekly: 7 }[st.backupReminder || 'daily'] ?? 1;
+  if (st.lastBackupAt && (!st.lastChangeAt || st.lastChangeAt <= st.lastBackupAt || daysSince(st.lastBackupAt) < wait)) return '';
+  const days = Math.floor(daysSince(st.lastBackupAt));
+  const msg = !st.lastBackupAt ? 'You have not made a backup yet.' : `You have changes since your last backup (${days === 0 ? 'today' : days === 1 ? 'yesterday' : days + ' days ago'}).`;
+  return `<div class="banner"><div class="grow">${msg} Your data lives only on this iPhone — save a backup to Files/iCloud.</div><button class="btn sm" data-act="backup">Back up now</button></div>`;
 }
 
 // ---------------------------------------------------------------- views
@@ -1141,11 +1143,20 @@ V.home = () => {
           <li>Create leases for tenants, then record rent, deposits & expenses.</li>
         </ol>
         <div class="btns" style="margin:0"><button class="btn" data-act="newProperty">Add first property</button><a class="btn sec" href="#/help">Install on iPhone</a></div>
-      </div>`,
+      </div>
+      <div class="card pad"><h3 style="margin:0 0 6px">Already have data?</h3>
+        <p class="muted small" style="margin:0 0 12px">If you cleared Safari data, reinstalled the app or got a new iPhone, restore your latest backup .zip from Files / iCloud Drive.</p>
+        <input type="file" id="welcomeRestore" accept=".zip,application/zip" hidden>
+        <button class="btn block" id="welcomeRestoreBtn">Restore from backup…</button></div>`,
+      bind(main) {
+        $('#welcomeRestoreBtn', main).onclick = () => $('#welcomeRestore', main).click();
+        $('#welcomeRestore', main).onchange = (e) => e.target.files[0] && restoreBackup(e.target.files[0]);
+      },
     };
   }
   return {
     title: 'Estate Ledger',
+    actions: [{ label: 'Back up', act: 'backup' }],
     html: `${backupBanner()}
       <div class="stats">
         <div class="stat"><div class="k">Rent ${esc(monthLabel(ym))}</div><div class="v">${money(collected)}</div><div class="x">of ${money(expected)} expected</div></div>
@@ -1610,6 +1621,7 @@ V.settings = () => ({
   html: `<form class="form card pad" id="sf" style="margin-top:12px">
       ${field('Currency', `<select name="currency">${[...new Set([S.settings.currency, ...CURRENCIES])].map((c) => opt(c, c, S.settings.currency)).join('')}</select>`)}
       ${field('Your name (shown instead of “Me”)', inp('myName', selfPartner()?.name))}
+      ${field('Backup reminder', `<select name="backupReminder">${opt('changes', 'Every time there are unsaved changes', S.settings.backupReminder || 'daily')}${opt('daily', 'Daily, if something changed', S.settings.backupReminder || 'daily')}${opt('weekly', 'Weekly, if something changed', S.settings.backupReminder || 'daily')}</select>`)}
       <label class="check"><input type="checkbox" name="compressPhotos" ${S.settings.compressPhotos ? 'checked' : ''}> Shrink large photos when uploading (saves space)</label>
       <button class="btn block">Save settings</button>
     </form>
@@ -1620,7 +1632,7 @@ V.settings = () => ({
     $('#sf', main).onsubmit = async (e) => {
       e.preventDefault();
       const d = readForm(main);
-      S.settings.currency = d.currency; S.settings.compressPhotos = d.compressPhotos; _nf = null;
+      S.settings.currency = d.currency; S.settings.compressPhotos = d.compressPhotos; S.settings.backupReminder = d.backupReminder; _nf = null;
       await saveSettings();
       const me = selfPartner();
       if (d.myName && me.name !== d.myName) { me.name = d.myName; await save('partners', me); }
@@ -1638,7 +1650,14 @@ V.help = () => ({
       <li>Tap the <b>Share</b> button → <b>Add to Home Screen</b> → <b>Add</b>.</li>
       <li>Open <b>Estate Ledger</b> from your Home Screen. From now on it works with no internet (try Airplane Mode).</li>
     </ol>
-    <p>Your data is stored inside the app on this iPhone only. Nothing is uploaded anywhere. Make regular backups (More › Export &amp; backup) and save them to Files or iCloud Drive.</p>
+    <h3>Backups — protect your data</h3>
+    <ul>
+      <li>Your data is stored inside the app on this iPhone only. Nothing is uploaded anywhere.</li>
+      <li>A backup (.zip) contains <b>everything</b>: all records, settings and every uploaded document. The app itself doesn't need backing up — it re-downloads from its web address.</li>
+      <li>Tap <b>Back up</b> on the Home screen, then <b>Save to Files</b> → <b>iCloud Drive</b> (so it survives even losing the phone). Each backup is checked right after it's made.</li>
+      <li>iPhone does not let web apps save files silently, so each backup needs that one tap. The app reminds you whenever you have unsaved changes (change how often in Settings).</li>
+      <li><b>Before clearing Safari history/website data or deleting the app, make a backup.</b> Afterwards: open the app's web address in Safari (needs internet once), Add to Home Screen, then tap <b>Restore from backup</b> on the welcome screen.</li>
+    </ul>
     <h3>How partner splitting works</h3>
     <ul>
       <li>Each property has owners with a %. Income and expenses for that property are split by those %.</li>
@@ -1804,11 +1823,19 @@ async function backup(withFiles) {
   }
   entries.push({ name: 'README.txt', data: 'Estate Ledger backup.\nRestore it from the app: More > Export & backup > Restore from backup.\ndata.json holds all records; files/ holds uploaded documents.\n' });
   const blob = await Zip.create(entries);
+  // Read the finished zip back to prove it restores: data parses, record counts and every document match.
+  const check = await Zip.read(await blob.arrayBuffer());
+  const back = JSON.parse(new TextDecoder().decode(check.get('data.json')));
+  const nFiles = [...check.keys()].filter((n) => n.startsWith('files/')).length;
+  const recs = DATA_STORES.reduce((a, k) => a + (back[k] || []).length, 0);
+  const expectRecs = DATA_STORES.reduce((a, k) => a + S[k].length, 0);
+  if (recs !== expectRecs || (withFiles && nFiles !== entries.length - 2)) throw new Error('Verification of the backup file failed. Please try again.');
+  const note = `✓ Verified: ${recs} records${withFiles ? `, ${nFiles} documents` : ' (documents not included)'}.`;
   offerFile(blob, `EstateLedger_backup_${today()}${withFiles ? '' : '_nofiles'}.zip`, async () => {
     S.settings.lastBackupAt = new Date().toISOString();
     await saveSettings();
     render();
-  });
+  }, note);
 }
 async function restoreBackup(file) {
   try {
