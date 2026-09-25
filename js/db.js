@@ -53,6 +53,22 @@ const DB = (() => {
     return done(tx);
   }
 
+  async function putMany(store, rows) {
+    const db = await open();
+    const tx = db.transaction(store, 'readwrite');
+    const os = tx.objectStore(store);
+    for (const r of rows) os.put(r);
+    return done(tx);
+  }
+
+  async function delMany(store, ids) {
+    const db = await open();
+    const tx = db.transaction(store, 'readwrite');
+    const os = tx.objectStore(store);
+    for (const id of ids) os.delete(id);
+    return done(tx);
+  }
+
   async function del(store, id) {
     const db = await open();
     const tx = db.transaction(store, 'readwrite');
@@ -76,5 +92,5 @@ const DB = (() => {
     return replaceAll({});
   }
 
-  return { STORES, open, getAll, get, put, del, replaceAll, clearAll };
+  return { STORES, open, getAll, get, put, putMany, del, delMany, replaceAll, clearAll };
 })();

@@ -1,5 +1,5 @@
 'use strict';
-// Tiny ZIP (store-only writer, store/deflate reader) and XLSX writer. No external libraries.
+// Tiny ZIP (store-only writer, store/deflate reader), XLSX writer/reader and CSV reader. No external libraries.
 const Zip = (() => {
   const TABLE = new Uint32Array(256);
   for (let n = 0; n < 256; n++) {
@@ -155,13 +155,26 @@ const Xlsx = (() => {
     return `<c r="${ref}" t="inlineStr"${bold ? ' s="5"' : ''}><is><t xml:space="preserve">${xmlEsc(value)}</t></is></c>`;
   }
 
+  // Data validation (dropdown). list: array of allowed values. Short lists are written inline (they survive
+  // most spreadsheet apps); long ones point at a range on another sheet (ref, e.g. "Lists!$A$2:$A$40").
+  function validationXml(v, sqref) {
+    const inline = v.list.map((x) => String(x).replace(/"/g, '""')).join(',');
+    const useInline = !v.ref || (inline.length <= 250 && !v.list.some((x) => String(x).includes(',')));
+    const formula = useInline ? `"${xmlEsc(inline)}"` : xmlEsc(v.ref);
+    const strict = v.strict !== false;
+    return `<dataValidation type="list" allowBlank="1" showInputMessage="1" showErrorMessage="1" errorStyle="${strict ? 'stop' : 'warning'}"` +
+      ` errorTitle="${xmlEsc(v.errorTitle || 'Not in the list')}" error="${xmlEsc(v.error || (strict ? 'Please pick a value from the dropdown list.' : 'This is not in the list. Keep it anyway?'))}"` +
+      (v.prompt ? ` promptTitle="${xmlEsc(v.promptTitle || '')}" prompt="${xmlEsc(v.prompt.slice(0, 250))}"` : '') +
+      ` sqref="${sqref}"><formula1>${formula}</formula1></dataValidation>`;
+  }
+
   function sheetXml(sheet) {
     const cols = sheet.columns;
-    const widths = cols.map((c) => Math.max(8, String(c.header).length + 2));
+    const widths = cols.map((c) => c.width || Math.max(8, String(c.header).length + 2));
     sheet.rows.forEach((r) => {
       const vals = Array.isArray(r) ? r : r.cells;
       vals.forEach((v, i) => {
-        if (i >= widths.length) return;
+        if (i >= widths.length || cols[i].width) return;
         const len = cols[i].type === 'date' ? 11 : cols[i].type === 'money' ? String(Math.round(v || 0)).length + 6 : String(v ?? '').length + 2;
         widths[i] = Math.min(60, Math.max(widths[i], len));
       });
@@ -177,8 +190,15 @@ const Xlsx = (() => {
       const n = ri + 2;
       x += `<row r="${n}">` + vals.map((v, i) => cell(colName(i) + n, v, (cols[i] || {}).type, bold)).join('') + '</row>';
     });
+    // empty rows that are still formatted (dates/amounts) so a template is easy to fill in
+    for (let n = sheet.rows.length + 2; n <= (sheet.blankRows || 0) + 1; n++) {
+      const styled = cols.map((c, i) => (c.type === 'date' ? `<c r="${colName(i)}${n}" s="2"/>` : c.type === 'money' ? `<c r="${colName(i)}${n}" s="3"/>` : '')).join('');
+      if (styled) x += `<row r="${n}">${styled}</row>`;
+    }
     x += '</sheetData>';
-    if (cols.length) x += `<autoFilter ref="A1:${colName(cols.length - 1)}${Math.max(1, sheet.rows.length + 1)}"/>`;
+    if (cols.length && !sheet.noFilter) x += `<autoFilter ref="A1:${colName(cols.length - 1)}${Math.max(1, sheet.rows.length + 1)}"/>`;
+    const vals = cols.map((c, i) => (c.validation && c.validation.list.length ? validationXml(c.validation, `${colName(i)}2:${colName(i)}${Math.max(2, (sheet.blankRows || 0) + 1)}`) : '')).filter(Boolean);
+    if (vals.length) x += `<dataValidations count="${vals.length}">${vals.join('')}</dataValidations>`;
     x += '</worksheet>';
     return x;
   }
@@ -231,7 +251,7 @@ const Xlsx = (() => {
     files.push({
       name: 'xl/workbook.xml',
       data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>' +
-        names.map((n, i) => `<sheet name="${xmlEsc(n)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join('') +
+        names.map((n, i) => `<sheet name="${xmlEsc(n)}" sheetId="${i + 1}"${sheets[i].hidden ? ' state="hidden"' : ''} r:id="rId${i + 1}"/>`).join('') +
         '</sheets></workbook>',
     });
     files.push({
@@ -246,5 +266,93 @@ const Xlsx = (() => {
     return Zip.create(files, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   }
 
-  return { build };
+  // ---- reader: returns [{ name, rows: [[cell, …], …] }]. Cells are strings, numbers or booleans.
+  function attr(el, name) { return el.getAttribute(name); }
+  function colIndex(ref) {
+    const m = /^([A-Z]+)/.exec(ref || '');
+    if (!m) return -1;
+    let n = 0;
+    for (const ch of m[1]) n = n * 26 + (ch.charCodeAt(0) - 64);
+    return n - 1;
+  }
+  const textOf = (el) => Array.from(el.getElementsByTagNameNS('*', 't')).map((t) => t.textContent).join('');
+  async function read(buffer) {
+    const files = await Zip.read(buffer);
+    const dec = new TextDecoder();
+    const xml = (name) => {
+      const key = [...files.keys()].find((k) => k.toLowerCase() === name.toLowerCase());
+      return key ? new DOMParser().parseFromString(dec.decode(files.get(key)), 'application/xml') : null;
+    };
+    const wb = xml('xl/workbook.xml');
+    if (!wb) throw new Error('This is not an Excel (.xlsx) file.');
+    const rels = xml('xl/_rels/workbook.xml.rels');
+    const target = {};
+    if (rels) for (const r of Array.from(rels.getElementsByTagNameNS('*', 'Relationship'))) target[attr(r, 'Id')] = attr(r, 'Target');
+    const ss = xml('xl/sharedStrings.xml');
+    const shared = ss ? Array.from(ss.getElementsByTagNameNS('*', 'si')).map(textOf) : [];
+    const out = [];
+    for (const sh of Array.from(wb.getElementsByTagNameNS('*', 'sheet'))) {
+      const rid = sh.getAttribute('r:id') || sh.getAttributeNS('http://schemas.openxmlformats.org/officeDocument/2006/relationships', 'id');
+      let t = target[rid] || '';
+      t = t.startsWith('/') ? t.slice(1) : 'xl/' + t.replace(/^\.\//, '');
+      const doc = xml(t);
+      if (!doc) continue;
+      const rows = [];
+      for (const r of Array.from(doc.getElementsByTagNameNS('*', 'row'))) {
+        const ri = (Number(attr(r, 'r')) || rows.length + 1) - 1;
+        const row = [];
+        let ci = 0;
+        for (const c of Array.from(r.getElementsByTagNameNS('*', 'c'))) {
+          const ref = attr(c, 'r');
+          if (ref) ci = colIndex(ref);
+          const type = attr(c, 't');
+          const v = c.getElementsByTagNameNS('*', 'v')[0];
+          let val = '';
+          if (type === 's') val = v ? shared[Number(v.textContent)] ?? '' : '';
+          else if (type === 'inlineStr') val = textOf(c);
+          else if (type === 'str' || type === 'e') val = v ? v.textContent : '';
+          else if (type === 'b') val = v ? v.textContent === '1' : '';
+          else if (v && v.textContent !== '') val = Number(v.textContent);
+          row[ci] = val;
+          ci++;
+        }
+        for (let i = 0; i < row.length; i++) if (row[i] === undefined) row[i] = '';
+        rows[ri] = row;
+      }
+      for (let i = 0; i < rows.length; i++) if (!rows[i]) rows[i] = [];
+      out.push({ name: attr(sh, 'name'), hidden: attr(sh, 'state') === 'hidden' || attr(sh, 'state') === 'veryHidden', rows });
+    }
+    return out;
+  }
+  // Excel serial day number -> YYYY-MM-DD
+  function serialToYmd(n) {
+    const d = new Date(Date.UTC(1899, 11, 30) + Math.round(n * 86400000));
+    return d.toISOString().slice(0, 10);
+  }
+
+  return { build, read, serialToYmd, colName };
 })();
+
+// RFC 4180 CSV with auto-detected delimiter (comma, semicolon or tab). Returns [[cell, …], …].
+function parseCsv(text) {
+  text = text.replace(/^\uFEFF/, '');
+  const first = text.split(/\r?\n/, 1)[0] || '';
+  const count = (ch) => first.split(ch).length - 1;
+  const delim = [',', ';', '\t'].sort((a, b) => count(b) - count(a))[0];
+  const rows = [];
+  let row = [], cellv = '', q = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (q) {
+      if (ch === '"') { if (text[i + 1] === '"') { cellv += '"'; i++; } else q = false; }
+      else cellv += ch;
+    } else if (ch === '"' && cellv === '') q = true;
+    else if (ch === delim) { row.push(cellv); cellv = ''; }
+    else if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && text[i + 1] === '\n') i++;
+      row.push(cellv); rows.push(row); row = []; cellv = '';
+    } else cellv += ch;
+  }
+  if (cellv !== '' || row.length) { row.push(cellv); rows.push(row); }
+  return rows;
+}

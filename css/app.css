@@ -197,3 +197,12 @@ table.t tr.tot td { font-weight: 700; }
 .seg-in input { position: absolute; opacity: 0; pointer-events: none; width: 1px; height: 1px; }
 .chip.warn-owner { background: var(--warn-soft); color: var(--warn); }
 .warn { color: var(--warn); }
+.map-grid { display: grid; grid-template-columns: minmax(90px, 38%) 1fr; gap: 6px 10px; align-items: center; }
+.map-grid span { font-size: 14px; }
+.map-grid select, .match-row select { font-size: 15px; padding: 8px 28px 8px 10px; min-width: 0; }
+.match-row { flex-wrap: wrap; }
+.match-row select { flex: 1 1 100%; }
+.imp-row .t, .imp-row .s { white-space: normal; }
+.imp-row.skip { opacity: .6; }
+.v.warn, .stat .warn { color: var(--warn); }
+details > summary { cursor: pointer; }
