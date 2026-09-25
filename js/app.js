@@ -145,9 +145,32 @@ function txnSubtitle(t) {
   if (t.unitId) bits.push(unitName(t.unitId));
   if (t.leaseId) { const l = byId('leases', t.leaseId); if (l) bits.push(tenantName(l.tenantId)); }
   if (t.period && isRentPayment(t)) bits.push('for ' + monthLabel(t.period));
-  if (t.via && t.via.id) bits.push((KINDS[t.kind].dir === 'out' ? 'paid by ' : 'into ') + viaLabel(t.via));
-  if (t.description) bits.push(t.description);
+  if (t.via && t.via.id) bits.push((KINDS[t.kind].dir === 'out' ? 'paid from ' : 'into ') + viaLabel(t.via));
+  if (t.handledBy && t.via?.t === 'a') bits.push((KINDS[t.kind].dir === 'out' ? 'paid by ' : 'collected by ') + partnerName(t.handledBy));
   return bits.filter(Boolean).join(' · ');
+}
+// Partners who own a property (in the order they are listed), or [] if none / no property.
+function ownerIds(propertyId) {
+  const p = byId('properties', propertyId);
+  return p ? [...new Set((p.owners || []).map((o) => o.partnerId).filter((id) => byId('partners', id)))] : [];
+}
+// Partners to offer for an entry: the property's owners when it has any, otherwise everyone.
+// `keep` ids stay in the list (e.g. values already saved on an entry being edited).
+function partnersFor(propertyId, keep = []) {
+  const own = ownerIds(propertyId);
+  if (!own.length) return S.partners;
+  const ids = new Set([...own, ...keep.filter(Boolean)]);
+  return S.partners.filter((p) => ids.has(p.id));
+}
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+const normName = (s) => String(s || '').trim().replace(/\s+/g, ' ').toLowerCase();
+const findByName = (store, name, exceptId) => S[store].find((x) => x.id !== exceptId && normName(x.name) === normName(name));
+// Accounts to offer for a property: that property's own accounts first, then shared ones.
+function accountsFor(propertyId) {
+  const own = propertyId ? S.accounts.filter((a) => a.propertyId === propertyId) : [];
+  const shared = S.accounts.filter((a) => !a.propertyId);
+  const other = S.accounts.filter((a) => a.propertyId && a.propertyId !== propertyId);
+  return { own, shared, other };
 }
 // Signed amount from the business point of view (income +, expense −, others shown neutral)
 function txnSigned(t) {
@@ -357,11 +380,11 @@ function moneyInput(name, value, attrs = '') {
 }
 const num = (v) => { const n = parseFloat(String(v ?? '').replace(/[, ]/g, '')); return isFinite(n) ? n : 0; };
 
-function partnerOptions(sel, withBlank) {
-  return (withBlank ? opt('', withBlank, sel) : '') + S.partners.map((p) => opt(p.id, p.name + (p.isSelf ? ' (me)' : ''), sel)).join('');
+function partnerOptions(sel, withBlank, list = S.partners) {
+  return (withBlank ? opt('', withBlank, sel) : '') + list.map((p) => opt(p.id, p.name + (p.isSelf ? ' (me)' : ''), sel)).join('');
 }
 function accountOptions(sel, withBlank) {
-  return (withBlank ? opt('', withBlank, sel) : '') + S.accounts.map((a) => opt(a.id, a.name, sel)).join('');
+  return (withBlank ? opt('', withBlank, sel) : '') + S.accounts.map((a) => opt(a.id, a.name + (a.propertyId && !normName(a.name).includes(normName(propName(a.propertyId))) ? ` (${propName(a.propertyId)})` : ''), sel)).join('');
 }
 function propertyOptions(sel, withBlank) {
   return (withBlank ? opt('', withBlank, sel) : '') + [...S.properties].sort((a, b) => a.name.localeCompare(b.name)).map((p) => opt(p.id, p.name, sel)).join('');
@@ -395,6 +418,12 @@ function readOwners(root) {
   });
   return out;
 }
+// Names of partners picked in more than one owner row.
+function duplicateOwners(owners) {
+  const seen = new Set(), dup = new Set();
+  for (const o of owners) (seen.has(o.partnerId) ? dup : seen).add(o.partnerId);
+  return [...dup].map(partnerName);
+}
 function bindOwners(root, getOwners) {
   let owners = getOwners();
   const rerender = () => {
@@ -407,7 +436,9 @@ function bindOwners(root, getOwners) {
   };
   const upd = () => {
     const tot = r2(sum(readOwners(root), (o) => o.pct));
-    $('#ownerSum', root).innerHTML = tot === 100 ? `Total ${tot}% ✓` : `<span class="err">Total is ${tot}% — should be 100%</span>`;
+    const dup = duplicateOwners($$('.owner-row select', root).map((el) => ({ partnerId: el.value })));
+    $('#ownerSum', root).innerHTML = (dup.length ? `<span class="err">${esc(dup.join(', '))} is listed more than once — remove the extra row.</span><br>` : '') +
+      (tot === 100 ? `Total ${tot}% ✓` : `<span class="err">Total is ${tot}% — should be 100%</span>`);
   };
   const snapshot = () => { owners = $$('.owner-row', root).map((row, i) => ({ partnerId: $(`[name="owner_p_${i}"]`, row).value, pct: $(`[name="owner_pct_${i}"]`, row).value })); };
   const bindRows = () => {
@@ -417,7 +448,8 @@ function bindOwners(root, getOwners) {
   $('#addOwner', root).onclick = () => {
     snapshot();
     const used = new Set(owners.map((o) => o.partnerId));
-    const next = S.partners.find((p) => !used.has(p.id)) || S.partners[0];
+    const next = S.partners.find((p) => !used.has(p.id));
+    if (!next) return toast('Every partner is already listed. Use “+ New partner” to add someone new.');
     const rest = Math.max(0, r2(100 - sum(owners, (o) => num(o.pct))));
     owners.push({ partnerId: next.id, pct: rest });
     rerender();
@@ -426,8 +458,14 @@ function bindOwners(root, getOwners) {
     const name = prompt('New partner name');
     if (!name || !name.trim()) return;
     snapshot();
-    const p = { id: uid(), name: name.trim() };
-    await save('partners', p);
+    let p = findByName('partners', name);
+    if (p) {
+      if (owners.some((o) => o.partnerId === p.id)) return toast(`${p.name} is already an owner here`);
+      toast(`${p.name} already exists — added the existing partner`);
+    } else {
+      p = { id: uid(), name: name.trim().replace(/\s+/g, ' ') };
+      await save('partners', p);
+    }
     const rest = Math.max(0, r2(100 - sum(owners, (o) => num(o.pct))));
     owners.push({ partnerId: p.id, pct: rest });
     rerender();
@@ -599,6 +637,8 @@ function propertyForm(id) {
       if (!d.name) return toast('Name is required');
       const owners = readOwners(b);
       if (!owners.length) return toast('Add at least one owner');
+      const dup = duplicateOwners($$('.owner-row select', b).map((el) => ({ partnerId: el.value })));
+      if (dup.length) return toast(`${dup.join(', ')} is listed more than once`);
       const tot = r2(sum(owners, (o) => o.pct));
       if (tot !== 100 && !confirm(`Ownership adds up to ${tot}%, not 100%. Shares will be scaled proportionally. Continue?`)) return;
       Object.assign(p, { name: d.name, address: d.address, type: d.type, purchaseDate: d.purchaseDate, purchasePrice: d.purchasePrice ? num(d.purchasePrice) : '', currentValue: d.currentValue ? num(d.currentValue) : '', notes: d.notes, owners });
@@ -664,12 +704,17 @@ function partnerForm(id) {
     <div class="two">${field('Phone', inp('phone', p.phone, 'type="tel"'))}${field('Email', inp('email', p.email, 'type="email"'))}</div>
     ${field('Notes', `<textarea name="notes">${esc(p.notes || '')}</textarea>`)}
     <button class="btn block">Save</button>
+    ${id && S.partners.length > 1 ? '<button type="button" class="btn sec block" id="merge" style="margin-top:8px">Merge into another partner…</button><div class="hint" style="margin-top:6px">Use this if the same person was added twice.</div>' : ''}
     ${id && !p.isSelf ? '<button type="button" class="btn danger block" id="del">Delete partner</button>' : ''}
   </form>`, (b) => {
+    const mg = $('#merge', b);
+    if (mg) mg.onclick = () => mergeForm('partners', p.id);
     $('#f', b).onsubmit = async (e) => {
       e.preventDefault();
       const d = readForm(b);
       if (!d.name) return toast('Name is required');
+      const same = findByName('partners', d.name, p.id);
+      if (same && !confirm(`A partner called “${same.name}” already exists. Two partners with the same name will look like duplicates.\n\nSave anyway? (To combine them, use “Merge into another partner” instead.)`)) return;
       Object.assign(p, d);
       await save('partners', p);
       closeSheet(); render();
@@ -685,25 +730,41 @@ function partnerForm(id) {
   });
 }
 
-function accountForm(id) {
-  const a = id ? { ...byId('accounts', id) } : { id: uid(), name: '', owners: S.partners.map((p) => ({ partnerId: p.id, pct: r2(100 / S.partners.length) })) };
-  openSheet(id ? 'Edit account' : 'New common account', `<form class="form" id="f">
+function accountForm(id, preset = {}) {
+  const a = id ? { ...byId('accounts', id) } : { id: uid(), name: '', openingBalance: 0, openingDate: today(), ...preset };
+  if (!id && !a.owners) a.owners = ownerIds(a.propertyId).length ? byId('properties', a.propertyId).owners.map((o) => ({ ...o })) : S.partners.map((p) => ({ partnerId: p.id, pct: r2(100 / S.partners.length) }));
+  const draw = () => {
+    const b = $('#sheetBody');
+    b.innerHTML = `<form class="form" id="f">
     ${field('Account name', inp('name', a.name, 'required placeholder="e.g. Joint bank account, Cash box"'))}
     ${field('Bank / details', inp('details', a.details, 'placeholder="Bank name, last 4 digits"'))}
+    ${field('Property', `<select name="propertyId" id="accProp">${propertyOptions(a.propertyId, 'Shared by all properties')}</select>`, 'Link a property\'s rent / mortgage account to it, so entries for that property pick it automatically.')}
     <div class="two">${field('Opening balance', moneyInput('openingBalance', a.openingBalance ?? 0))}${field('As of', inp('openingDate', a.openingDate || today(), 'type="date"'))}</div>
     <label class="field"><span>Who owns this account &amp; %</span></label>
     ${ownersEditor(a.owners || [])}
-    <div class="hint">Used to split entries that are not tied to a property (e.g. a partner withdrawing from this account for personal use).</div>
+    <div class="hint">Entries that belong to a property are always split by that property's owners. These % are only used for entries with no property (e.g. bank charges on a joint account).</div>
     ${field('Notes', `<textarea name="notes">${esc(a.notes || '')}</textarea>`)}
     <button class="btn block">Save</button>
     ${id ? '<button type="button" class="btn danger block" id="del">Delete account</button>' : ''}
-  </form>`, (b) => {
+  </form>`;
     bindOwners(b, () => a.owners || []);
+    $('#accProp', b).onchange = (e) => {
+      const d = readForm(b);
+      Object.assign(a, { name: d.name, details: d.details, openingBalance: d.openingBalance, openingDate: d.openingDate, notes: d.notes, owners: readOwners(b), propertyId: e.target.value });
+      const po = byId('properties', a.propertyId)?.owners;
+      if (po?.length) a.owners = po.map((o) => ({ ...o }));
+      if (!a.name && a.propertyId) a.name = propName(a.propertyId) + ' account';
+      draw();
+    };
     $('#f', b).onsubmit = async (e) => {
       e.preventDefault();
       const d = readForm(b);
       if (!d.name) return toast('Name is required');
-      Object.assign(a, { name: d.name, details: d.details, openingBalance: num(d.openingBalance), openingDate: d.openingDate, notes: d.notes, owners: readOwners(b) });
+      const owners = readOwners(b);
+      const dup = duplicateOwners($$('.owner-row select', b).map((el) => ({ partnerId: el.value })));
+      if (dup.length) return toast(`${dup.join(', ')} is listed more than once`);
+      if (findByName('accounts', d.name, a.id) && !confirm(`An account called “${d.name}” already exists. Save another one with the same name?`)) return;
+      Object.assign(a, { name: d.name, details: d.details, propertyId: d.propertyId || '', openingBalance: num(d.openingBalance), openingDate: d.openingDate, notes: d.notes, owners });
       await save('accounts', a);
       closeSheet(); render();
     };
@@ -713,7 +774,8 @@ function accountForm(id) {
       if (!confirm('Delete account?')) return;
       await remove('accounts', a.id); closeSheet(); render();
     };
-  });
+  };
+  openSheet(id ? 'Edit account' : 'New common account', '', draw);
 }
 
 function tenantForm(id, onSaved) {
@@ -731,13 +793,18 @@ function tenantForm(id, onSaved) {
       ${field('Notes', `<textarea name="notes">${esc(t.notes || '')}</textarea>`)}
       ${attachBlock(id ? filesFor('tenant', id) : [], pending)}
       <button class="btn block">Save</button>
+      ${id && S.tenants.length > 1 ? '<button type="button" class="btn sec block" id="merge" style="margin-top:8px">Merge into another tenant…</button>' : ''}
       ${id ? '<button type="button" class="btn danger block" id="del">Delete tenant</button>' : ''}
     </form>`;
     bindAttach(b, pending, draw);
+    const mg = $('#merge', b);
+    if (mg) mg.onclick = () => mergeForm('tenants', t.id);
     $('#f', b).onsubmit = async (e) => {
       e.preventDefault();
       Object.assign(t, readForm(b));
       if (!t.name) return toast('Name is required');
+      const same = findByName('tenants', t.name, t.id);
+      if (same && !confirm(`A tenant called “${same.name}” already exists${tenantWhere(same.id) ? ' (' + tenantWhere(same.id) + ')' : ''}.\n\nSave another tenant with the same name?`)) return;
       await save('tenants', t);
       await storeFiles(pending, { linkType: 'tenant', linkId: t.id });
       closeSheet();
@@ -752,6 +819,84 @@ function tenantForm(id, onSaved) {
     };
   };
   openSheet(id ? 'Edit tenant' : 'New tenant', '', draw);
+}
+
+// Where a tenant rents: "Unit · Property" of their current (or latest) lease.
+function tenantWhere(tenantId) {
+  const ls = S.leases.filter((l) => l.tenantId === tenantId).sort((a, b) => (a.status === 'ended') - (b.status === 'ended') || b.startDate.localeCompare(a.startDate));
+  return ls[0] ? `${unitName(ls[0].unitId)} · ${propName(byId('units', ls[0].unitId)?.propertyId)}${ls[0].status === 'ended' ? ' (past)' : ''}` : '';
+}
+const tenantPropertyIds = (tenantId) => new Set(S.leases.filter((l) => l.tenantId === tenantId).map((l) => byId('units', l.unitId)?.propertyId).filter(Boolean));
+
+// Move every reference from one partner to another, then delete the first one.
+async function mergePartners(fromId, toId) {
+  const from = byId('partners', fromId), to = byId('partners', toId);
+  const mergeOwners = (owners) => {
+    const out = [];
+    for (const o of owners || []) {
+      const pid = o.partnerId === fromId ? toId : o.partnerId;
+      const hit = out.find((x) => x.partnerId === pid);
+      if (hit) hit.pct = r2(num(hit.pct) + num(o.pct)); else out.push({ ...o, partnerId: pid });
+    }
+    return out;
+  };
+  for (const store of ['properties', 'accounts']) {
+    for (const x of S[store].filter((x) => x.owners?.some((o) => o.partnerId === fromId))) { x.owners = mergeOwners(x.owners); await save(store, x); }
+  }
+  for (const t of S.txns) {
+    let ch = false;
+    for (const k of ['partnerId', 'toPartnerId', 'handledBy']) if (t[k] === fromId) { t[k] = toId; ch = true; }
+    if (t.via?.t === 'p' && t.via.id === fromId) { t.via = { t: 'p', id: toId }; ch = true; }
+    if (t.split?.some((x) => x.partnerId === fromId)) { t.split = mergeOwners(t.split); ch = true; }
+    if (ch) await save('txns', t);
+  }
+  if (from.isSelf) { to.isSelf = true; }
+  for (const k of ['phone', 'email', 'notes']) if (!to[k] && from[k]) to[k] = from[k];
+  await save('partners', to);
+  await remove('partners', fromId);
+}
+async function mergeTenants(fromId, toId) {
+  const from = byId('tenants', fromId), to = byId('tenants', toId);
+  for (const l of S.leases.filter((l) => l.tenantId === fromId)) { l.tenantId = toId; await save('leases', l); }
+  for (const f of S.files.filter((f) => f.linkType === 'tenant' && f.linkId === fromId)) { f.linkId = toId; await save('files', f); }
+  for (const k of ['phone', 'email', 'idRef', 'emergency', 'notes']) if (!to[k] && from[k]) to[k] = from[k];
+  await save('tenants', to);
+  await remove('tenants', fromId);
+}
+function mergeForm(store, fromId, after) {
+  const isP = store === 'partners';
+  const from = byId(store, fromId);
+  const others = S[store].filter((x) => x.id !== fromId).sort((a, b) => (normName(b.name) === normName(from.name)) - (normName(a.name) === normName(from.name)) || a.name.localeCompare(b.name));
+  const label = (x) => x.name + (isP ? (x.isSelf ? ' (me)' : '') : (tenantWhere(x.id) ? ' — ' + tenantWhere(x.id) : ''));
+  openSheet(isP ? 'Merge partner' : 'Merge tenant', `<form class="form" id="f">
+    <div class="card pad" style="margin:0 0 12px">Merge <b>${esc(label(from))}</b> into another ${isP ? 'partner' : 'tenant'}. Everything recorded under ${esc(from.name)} (${isP ? 'property & account ownership, entries, splits' : 'leases and documents'}) moves to the one you choose, and this duplicate is removed.</div>
+    ${field('Keep this one', `<select name="to">${others.map((x) => opt(x.id, label(x), others[0]?.id)).join('')}</select>`)}
+    <button class="btn block">Merge</button>
+  </form>`, (b) => {
+    $('#f', b).onsubmit = async (e) => {
+      e.preventDefault();
+      const toId = readForm(b).to;
+      const to = byId(store, toId);
+      if (!to) return;
+      if (!confirm(`Merge “${from.name}” into “${to.name}”? This cannot be undone (make a backup first if unsure).`)) return;
+      if (isP) await mergePartners(fromId, toId); else await mergeTenants(fromId, toId);
+      closeSheet();
+      toast('Merged');
+      if (after) after(); else if (!isP && location.hash.includes(fromId)) location.hash = '#/tenant/' + toId; else render();
+    };
+  });
+}
+
+// Tenants for a lease picker: those at this property first, then new ones, then everyone else.
+function tenantOptionsGrouped(sel, propertyId) {
+  const sorted = [...S.tenants].sort((a, b) => a.name.localeCompare(b.name));
+  const here = [], none = [], other = [];
+  for (const t of sorted) {
+    const props = tenantPropertyIds(t.id);
+    (propertyId && props.has(propertyId) ? here : !props.size ? none : other).push(t);
+  }
+  const grp = (label, list, withWhere) => (list.length ? `<optgroup label="${esc(label)}">${list.map((t) => opt(t.id, t.name + (withWhere && tenantWhere(t.id) ? ' — ' + tenantWhere(t.id) : ''), sel)).join('')}</optgroup>` : '');
+  return grp(propertyId ? 'At ' + propName(propertyId) : 'Tenants', here, false) + grp('Not renting yet', none, false) + grp(propertyId ? 'At other properties' : 'Renting', other, true);
 }
 
 function unitOptionsGrouped(sel) {
@@ -775,7 +920,7 @@ function leaseForm(id, preset = {}) {
     if ($('#f', b) && skipRead !== true) Object.assign(l, readForm(b));
     b.innerHTML = `<form class="form" id="f">
       ${field('Unit', `<select name="unitId" required>${opt('', 'Choose unit…', l.unitId)}${unitOptionsGrouped(l.unitId)}</select>`)}
-      ${field('Tenant', `<select name="tenantId" id="tenantSel">${opt('', 'Choose tenant…', l.tenantId)}${S.tenants.map((t) => opt(t.id, t.name, l.tenantId)).join('')}${opt('__new', '+ New tenant…', '')}</select>`)}
+      ${field('Tenant', `<select name="tenantId" id="tenantSel">${opt('', 'Choose tenant…', l.tenantId)}${tenantOptionsGrouped(l.tenantId, byId('units', l.unitId)?.propertyId)}${opt('__new', '+ New tenant…', '')}</select>`)}
       <div class="two">${field('Start date', inp('startDate', l.startDate, 'type="date" required'))}${field('End date (optional)', inp('endDate', l.endDate, 'type="date"'))}</div>
       <div class="two">${field('Monthly rent', moneyInput('rent', l.rent, 'required'))}${field('Rent due day', inp('dueDay', l.dueDay, 'type="number" min="1" max="31" inputmode="numeric"'))}</div>
       ${field('Security deposit (agreed)', moneyInput('deposit', l.deposit))}
@@ -793,12 +938,16 @@ function leaseForm(id, preset = {}) {
       l.tenantId = '';
       const name = prompt('New tenant name');
       if (!name || !name.trim()) { draw(true); return; }
+      const same = findByName('tenants', name);
+      if (same && confirm(`“${same.name}” already exists${tenantWhere(same.id) ? ' (' + tenantWhere(same.id) + ')' : ''}.\n\nOK = use the existing tenant\nCancel = create a new tenant with the same name`)) { l.tenantId = same.id; draw(true); return; }
       const phone = prompt('Phone (optional)') || '';
       const t = { id: uid(), name: name.trim(), phone: phone.trim() };
       save('tenants', t).then(() => { l.tenantId = t.id; draw(true); });
     };
     $('[name=unitId]', b).onchange = (e) => {
       const u = byId('units', e.target.value);
+      if (u?.propertyId !== byId('units', l.unitId)?.propertyId) { Object.assign(l, readForm(b)); if (u && !l.rent && u.marketRent) l.rent = u.marketRent; if (u && !l.deposit && u.defaultDeposit) l.deposit = u.defaultDeposit; draw(true); return; }
+      l.unitId = e.target.value;
       if (u && !$('[name=rent]', b).value && u.marketRent) $('[name=rent]', b).value = u.marketRent;
       if (u && !$('[name=deposit]', b).value && u.defaultDeposit) $('[name=deposit]', b).value = u.defaultDeposit;
     };
@@ -860,12 +1009,69 @@ function endLeaseForm(id) {
 const VIA_KINDS = ['income', 'expense', 'deposit_in', 'deposit_out'];
 const SPLIT_KINDS = ['income', 'expense', 'deposit_in', 'deposit_out', 'contribution', 'withdrawal'];
 const LEASE_KINDS = ['deposit_in', 'deposit_out', 'deposit_apply'];
-function defaultVia(kind) {
+const NEW_ACCOUNT = '__new';
+// Default for new entries: the property's own account, else the last shared account used, else a shared
+// account, else a new account for this property. Paying/keeping money personally is never the default.
+// Is this "paid from / received into" choice valid for an entry of this property?
+function viaFits(v, propertyId) {
+  if (!v || !v.id) return false;
+  if (v.t === 'a') {
+    if (v.id === NEW_ACCOUNT) { const { own, shared } = accountsFor(propertyId); return !own.length && !shared.length; }
+    const a = byId('accounts', v.id);
+    return !!a && (!a.propertyId || !propertyId || a.propertyId === propertyId);
+  }
+  return !!byId('partners', v.id) && partnersFor(propertyId).some((p) => p.id === v.id);
+}
+function defaultVia(kind, propertyId) {
   const dir = KINDS[kind]?.dir === 'out' ? 'out' : 'in';
+  const { own, shared } = accountsFor(propertyId);
+  if (own.length) return { t: 'a', id: own[0].id };
   const saved = parseVia(S.settings.lastVia?.[dir]);
-  if (saved && (saved.t === 'a' ? byId('accounts', saved.id) : byId('partners', saved.id))) return saved;
-  if (S.accounts.length) return { t: 'a', id: S.accounts[0].id };
-  return { t: 'p', id: selfPartner().id };
+  if (saved?.t === 'a' && saved.id !== NEW_ACCOUNT && viaFits(saved, propertyId)) return saved;
+  if (shared.length) return { t: 'a', id: shared[0].id };
+  if (S.partners.length > 1 || S.accounts.length) return { t: 'a', id: NEW_ACCOUNT };
+  const me = selfPartner();
+  const ps = partnersFor(propertyId);
+  return { t: 'p', id: (ps.some((p) => p.id === me.id) ? me : ps[0] || me).id };
+}
+// Creates the common account chosen as "Common account (new)" in an entry.
+async function createDefaultAccount(propertyId) {
+  const p = byId('properties', propertyId);
+  const a = { id: uid(), name: p ? p.name + ' account' : 'Common account', propertyId: p ? p.id : '', openingBalance: 0, openingDate: today(),
+    owners: p?.owners?.length ? p.owners.map((o) => ({ ...o })) : S.partners.map((x) => ({ partnerId: x.id, pct: r2(100 / S.partners.length) })) };
+  await save('accounts', a);
+  return a;
+}
+// "Received into / Paid from" block: common account vs. a partner personally, plus who handled it.
+function viaFields(t, k) {
+  const out = KINDS[k].dir === 'out';
+  const mode = t.via?.t === 'p' ? 'p' : 'a';
+  const { own, shared, other } = accountsFor(t.propertyId);
+  const accSel = mode === 'a' ? t.via?.id : '';
+  const newOpt = opt(NEW_ACCOUNT, `${t.propertyId ? propName(t.propertyId) + ' account' : 'Common account'} (new — created when you save)`, accSel);
+  const accOpts = (!own.length && !shared.length ? newOpt : '') + (S.accounts.length
+    ? (own.length ? `<optgroup label="${esc(propName(t.propertyId))}">${own.map((a) => opt(a.id, a.name, accSel)).join('')}</optgroup>` : '') +
+      (shared.length ? `<optgroup label="Shared accounts">${shared.map((a) => opt(a.id, a.name, accSel)).join('')}</optgroup>` : '') +
+      (!t.propertyId && other.length ? `<optgroup label="Property accounts">${other.map((a) => opt(a.id, `${a.name} (${propName(a.propertyId)})`, accSel)).join('')}</optgroup>`
+        : other.filter((a) => a.id === accSel).map((a) => opt(a.id, `${a.name} (${propName(a.propertyId)})`, accSel)).join(''))
+    : '');
+  const owners = ownerIds(t.propertyId);
+  const people = partnersFor(t.propertyId, [mode === 'p' ? t.via?.id : '', t.handledBy]).map((p) => (owners.length && !owners.includes(p.id) ? { ...p, name: p.name + ' (not an owner)' } : p));
+  const pSel = mode === 'p' ? t.via?.id : '';
+  const whoName = pSel ? partnerName(pSel) : 'This partner';
+  const shareWord = t.split?.length ? 'split' : 'ownership %';
+  return `<div class="field"><span>${out ? 'Paid from' : 'Money went into'}</span>
+      <div class="seg seg-in">
+        <label class="${mode === 'a' ? 'on' : ''}"><input type="radio" name="viaMode" value="a" data-rr ${mode === 'a' ? 'checked' : ''}>Common / property account</label>
+        <label class="${mode === 'p' ? 'on' : ''}"><input type="radio" name="viaMode" value="p" data-rr ${mode === 'p' ? 'checked' : ''}>A partner personally</label>
+      </div></div>
+    ${mode === 'a' ? `
+      ${field('Account', `<select name="viaAcc" data-rr>${accOpts}</select>`)}
+      ${field(out ? 'Paid / arranged by (optional)' : 'Collected by (optional)', `<select name="handledBy">${partnerOptions(t.handledBy, '—', people)}</select>`)}
+      <div class="hint">${out ? 'Paid from the common money, so it is shared by the owners\' ' + shareWord + '. Nobody owes anyone for it.' : 'The money is in the common account, so it belongs to all owners by ' + shareWord + '. Nobody owes anyone for it — even if one partner collected it.'} If a partner later takes money out for personal use, record “Partner took money from common account”.</div>`
+    : `
+      ${field(out ? 'Which partner paid?' : 'Which partner kept the money?', `<select name="viaPartner" data-rr>${partnerOptions(pSel, 'Choose…', people)}</select>`)}
+      <div class="hint">${out ? `${esc(whoName)} paid from their own pocket. The other owners owe ${pSel ? esc(whoName) : 'them'} their share.` : `${esc(whoName)} kept the money personally (not deposited in a common account). ${pSel ? esc(whoName) : 'They'} owe${pSel ? 's' : ''} the other owners their share.`}</div>`}`;
 }
 function sharesText(shares) {
   const ents = Object.entries(shares);
@@ -889,22 +1095,32 @@ function applyLeaseDefaults(t) {
 function txnForm(id, preset = {}) {
   const isNew = !id;
   const t = id ? JSON.parse(JSON.stringify(byId('txns', id))) : { id: uid(), kind: 'expense', date: today(), amount: '', ...preset };
-  if (isNew && !t.via && VIA_KINDS.includes(t.kind)) t.via = defaultVia(t.kind);
   if (isNew && !t.category && KINDS[t.kind].cats.length === 1) t.category = KINDS[t.kind].cats[0];
   if (isNew && t.leaseId) applyLeaseDefaults(t);
+  if (isNew && VIA_KINDS.includes(t.kind) && !viaFits(t.via, t.propertyId)) t.via = defaultVia(t.kind, t.propertyId);
   let custom = !!(t.split && t.split.length);
   const pending = [];
 
   const pull = (b) => {
     const d = readForm(b);
     if (!('kind' in d)) return;
-    const prev = { kind: t.kind, propertyId: t.propertyId, unitId: t.unitId, leaseId: t.leaseId };
+    const prev = { kind: t.kind, propertyId: t.propertyId, unitId: t.unitId, leaseId: t.leaseId, accountId: t.accountId };
     t.kind = d.kind; t.date = d.date; t.amount = d.amount; t.category = d.category ?? t.category; t.description = d.description;
     if ('propertyId' in d) t.propertyId = d.propertyId || '';
     if ('unitId' in d) t.unitId = d.unitId || '';
     if ('leaseId' in d) t.leaseId = d.leaseId || '';
     if ('period' in d) t.period = d.period;
-    if ('via' in d) t.via = parseVia(d.via);
+    const prevVia = t.via;
+    if ('viaMode' in d) {
+      if (d.viaMode === 'p') t.via = { t: 'p', id: d.viaPartner ?? (prevVia?.t === 'p' ? prevVia.id : '') };
+      else t.via = { t: 'a', id: d.viaAcc ?? (prevVia?.t === 'a' ? prevVia.id : '') };
+      if (d.viaMode !== (prevVia?.t || 'a')) {
+        // switched between common account and partner: pick a sensible default on the new side
+        if (d.viaMode === 'p') { const ps = partnersFor(t.propertyId); t.via.id = (ps.find((x) => x.id === t.handledBy) || ps.find((x) => x.isSelf) || ps[0])?.id || ''; }
+        else { const dv = defaultVia(t.kind, t.propertyId); t.via.id = dv.t === 'a' ? dv.id : NEW_ACCOUNT; }
+      }
+    }
+    if ('handledBy' in d) t.handledBy = d.handledBy;
     if ('partnerId' in d) t.partnerId = d.partnerId;
     if ('toPartnerId' in d) t.toPartnerId = d.toPartnerId;
     if ('accountId' in d) t.accountId = d.accountId;
@@ -916,7 +1132,7 @@ function txnForm(id, preset = {}) {
       if (!KINDS[t.kind].cats.includes(t.category) && KINDS[prev.kind].cats.includes(t.category)) t.category = KINDS[t.kind].cats.length === 1 ? KINDS[t.kind].cats[0] : '';
       if (VIA_KINDS.includes(t.kind)) {
         const wasDir = KINDS[prev.kind].dir, nowDir = KINDS[t.kind].dir;
-        if (!t.via || (wasDir !== nowDir && t.via.t === 'a' && viaKey(t.via) === viaKey(defaultVia(prev.kind)))) t.via = defaultVia(t.kind);
+        if (!t.via || !t.via.id || (wasDir !== nowDir && t.via.t === 'a' && viaKey(t.via) === viaKey(defaultVia(prev.kind, t.propertyId)))) t.via = defaultVia(t.kind, t.propertyId);
       }
       if (t.kind === 'contribution' || t.kind === 'withdrawal') {
         if (!t.partnerId) t.partnerId = selfPartner().id;
@@ -934,6 +1150,19 @@ function txnForm(id, preset = {}) {
       const u = byId('units', t.unitId);
       if (u && u.propertyId !== t.propertyId) { t.unitId = ''; t.leaseId = ''; }
     }
+    // An account that belongs to a property implies that property.
+    const acc = t.via?.t === 'a' ? byId('accounts', t.via.id) : (t.kind === 'contribution' || t.kind === 'withdrawal') ? byId('accounts', t.accountId) : null;
+    if (acc?.propertyId && !t.propertyId && (viaKey(t.via) !== viaKey(prevVia) || t.accountId !== prev.accountId || t.kind !== prev.kind)) t.propertyId = acc.propertyId;
+    if (t.propertyId !== prev.propertyId) {
+      // keep people & accounts consistent with the property that is now selected
+      if (VIA_KINDS.includes(t.kind) && t.via && !viaFits(t.via, t.propertyId)) {
+        if (t.via.t === 'a') t.via = defaultVia(t.kind, t.propertyId);
+        else { const ps = partnersFor(t.propertyId); t.via = { t: 'p', id: (ps.find((x) => x.isSelf) || ps[0])?.id || '' }; }
+      }
+      const ids = new Set(partnersFor(t.propertyId).map((x) => x.id));
+      if (t.handledBy && !ids.has(t.handledBy)) t.handledBy = '';
+      if (custom && t.split) t.split = t.split.filter((x) => ids.has(x.partnerId));
+    }
   };
 
   const draw = () => {
@@ -949,8 +1178,8 @@ function txnForm(id, preset = {}) {
     if (periodable && !t.period) t.period = (t.date || today()).slice(0, 7);
     const autoShares = sharesFor({ ...t, split: null });
     const kindHelp = {
-      income: 'Money received (rent, fees…). Choose where it landed — the common account, or a partner who received it personally.',
-      expense: 'Money spent for a property. Choose who paid — the common account, or a partner from their own pocket. It is split between the owners.',
+      income: 'Money received (rent, fees…). Choose where it went — the common / property account, or a partner who kept it personally.',
+      expense: 'Money spent for a property (mortgage, repairs, tax…). Choose who paid — the common / property account, or a partner from their own pocket. It is split between the owners.',
       deposit_in: 'Tenant paid a security deposit. It is tracked as owed back to the tenant.',
       deposit_out: 'Deposit returned to the tenant.',
       deposit_apply: 'Part of the deposit is kept (for unpaid rent, damages…). It becomes income; no money moves.',
@@ -971,16 +1200,16 @@ function txnForm(id, preset = {}) {
         </div>` : ''}
       ${k === 'contribution' || k === 'withdrawal' ? `
         <div class="two">
-          ${field('Partner', `<select name="partnerId">${partnerOptions(t.partnerId, 'Choose…')}</select>`)}
-          ${field(k === 'contribution' ? 'Into account' : 'From account', `<select name="accountId">${accountOptions(t.accountId, S.accounts.length ? 'Choose…' : 'No accounts yet — add one in More › Accounts')}</select>`)}
+          ${field('Partner', `<select name="partnerId">${partnerOptions(t.partnerId, 'Choose…', partnersFor(t.propertyId || byId('accounts', t.accountId)?.propertyId, [t.partnerId]))}</select>`)}
+          ${field(k === 'contribution' ? 'Into account' : 'From account', `<select name="accountId" data-rr>${accountOptions(t.accountId, S.accounts.length ? 'Choose…' : 'No accounts yet — add one in More › Accounts')}</select>`)}
         </div>
         ${field('Property (optional)', `<select name="propertyId" data-rr>${propertyOptions(t.propertyId, 'Not property-specific')}</select>`, 'Set this if the money was for / from one property, so the right owners share it.')}` : ''}
       ${k === 'settlement' ? `
         <div class="two">
-          ${field('Paid by', `<select name="partnerId">${partnerOptions(t.partnerId, 'Choose…')}</select>`)}
-          ${field('Paid to', `<select name="toPartnerId">${partnerOptions(t.toPartnerId, 'Choose…')}</select>`)}
+          ${field('Paid by', `<select name="partnerId">${partnerOptions(t.partnerId, 'Choose…', partnersFor(t.propertyId, [t.partnerId, t.toPartnerId]))}</select>`)}
+          ${field('Paid to', `<select name="toPartnerId">${partnerOptions(t.toPartnerId, 'Choose…', partnersFor(t.propertyId, [t.partnerId, t.toPartnerId]))}</select>`)}
         </div>
-        ${field('Property (optional, for your reference)', `<select name="propertyId">${propertyOptions(t.propertyId, 'Not property-specific')}</select>`)}` : ''}
+        ${field('Property (optional)', `<select name="propertyId" data-rr>${propertyOptions(t.propertyId, 'Not property-specific')}</select>`, 'Choose the property this settles, so it clears that property\'s balances.')}` : ''}
       ${k === 'transfer' ? `
         <div class="two">
           ${field('From account', `<select name="accountId">${accountOptions(t.accountId, 'Choose…')}</select>`)}
@@ -988,13 +1217,13 @@ function txnForm(id, preset = {}) {
         </div>` : ''}
       ${field('Category', `<input name="category" list="cats" value="${esc(t.category || '')}" placeholder="Choose or type your own"><datalist id="cats">${KINDS[k].cats.map((c) => `<option value="${esc(c)}">`).join('')}${[...new Set(S.txns.filter((x) => x.kind === k).map((x) => x.category).filter((c) => c && !KINDS[k].cats.includes(c)))].map((c) => `<option value="${esc(c)}">`).join('')}</datalist>`)}
       ${periodable ? `<div id="periodWrap"${isRentCat(t.category) ? '' : ' hidden'}>${field('Rent for month', inp('period', t.period, 'type="month"'))}</div>` : ''}
-      ${VIA_KINDS.includes(k) ? field(KINDS[k].dir === 'out' ? 'Paid from' : 'Received into', `<select name="via">${viaOptions(viaKey(t.via))}</select>`, KINDS[k].dir === 'out' ? 'If a partner paid from their own pocket, choose them — the app will credit them and charge the other owners their share.' : 'If a partner collected it personally, choose them — the app records that they hold the other owners\' share.') : ''}
+      ${VIA_KINDS.includes(k) ? viaFields(t, k) : ''}
       ${SPLIT_KINDS.includes(k) ? `
         <div class="card pad" style="margin:0 0 12px">
           <div class="small muted">Shared between</div>
           <div>${custom ? 'Custom split below' : sharesText(autoShares)}</div>
           <label class="check" style="margin:8px 0 0"><input type="checkbox" name="customSplit" data-rr ${custom ? 'checked' : ''}> Custom split for this entry</label>
-          ${custom ? `<div class="split-grid" style="margin-top:10px">${S.partners.map((p) => {
+          ${custom ? `<div class="split-grid" style="margin-top:10px">${partnersFor(t.propertyId, (t.split || []).map((x) => x.partnerId)).map((p) => {
             const cur = t.split?.find((s) => s.partnerId === p.id)?.pct ?? r2((autoShares[p.id] || 0) * 100);
             return `<span>${esc(p.name)}</span><input name="split_${p.id}" inputmode="decimal" value="${esc(cur || '')}" placeholder="%">`;
           }).join('')}</div><div class="hint" style="margin:0">Percentages; e.g. 100 for a single partner if this cost is only theirs.</div>` : ''}
@@ -1015,7 +1244,8 @@ function txnForm(id, preset = {}) {
       if (!(amt > 0)) return toast('Enter an amount greater than 0');
       if (!t.date) return toast('Enter a date');
       if (needsLease && !t.leaseId) return toast('Choose the lease this deposit belongs to');
-      if (VIA_KINDS.includes(k) && !t.via) return toast(KINDS[k].dir === 'out' ? 'Choose who paid' : 'Choose where the money went');
+      if (VIA_KINDS.includes(k) && !t.via?.id) return toast(t.via?.t === 'p' ? (KINDS[k].dir === 'out' ? 'Choose which partner paid' : 'Choose which partner kept the money') : 'Choose the account');
+      if (VIA_KINDS.includes(k) && t.via.id !== NEW_ACCOUNT && !(t.via.t === 'a' ? byId('accounts', t.via.id) : byId('partners', t.via.id))) return toast('Choose the account or partner again');
       if ((k === 'contribution' || k === 'withdrawal') && (!t.partnerId || !t.accountId)) return toast('Choose the partner and the account');
       if (k === 'settlement' && (!t.partnerId || !t.toPartnerId || t.partnerId === t.toPartnerId)) return toast('Choose two different partners');
       if (k === 'transfer' && (!t.accountId || !t.toAccountId || t.accountId === t.toAccountId)) return toast('Choose two different accounts');
@@ -1024,7 +1254,11 @@ function txnForm(id, preset = {}) {
       if (propScoped || k === 'contribution' || k === 'withdrawal' || k === 'settlement') out.propertyId = t.propertyId || '';
       if (propScoped) { out.unitId = t.unitId || ''; out.leaseId = t.leaseId || ''; }
       if (periodable && isRentCat(t.category)) out.period = t.period || t.date.slice(0, 7);
-      if (VIA_KINDS.includes(k)) out.via = t.via;
+      if (VIA_KINDS.includes(k)) {
+        if (t.via.t === 'a' && t.via.id === NEW_ACCOUNT) { const a = await createDefaultAccount(out.propertyId); t.via = { t: 'a', id: a.id }; toast(`Created “${a.name}”`); }
+        out.via = { t: t.via.t, id: t.via.id };
+        if (t.via.t === 'a' && t.handledBy) out.handledBy = t.handledBy;
+      }
       if (k === 'deposit_apply') { const src = S.txns.find((x) => x.leaseId === t.leaseId && x.kind === 'deposit_in'); if (src) out.via = src.via; }
       if (k === 'contribution' || k === 'withdrawal' || k === 'settlement') out.partnerId = t.partnerId;
       if (k === 'settlement') out.toPartnerId = t.toPartnerId;
@@ -1065,7 +1299,7 @@ function txnRow(t) {
   const nFiles = S.files.filter((f) => f.linkType === 'txn' && f.linkId === t.id).length;
   const cls = s > 0 ? 'pos' : s < 0 ? 'neg' : 'muted';
   return `<div class="row nav" data-act="txn" data-id="${t.id}">
-    <div class="grow"><div class="t">${esc(txnTitle(t))}${nFiles ? ` <span class="chip">📎${nFiles}</span>` : ''}</div><div class="s">${esc(fmtDate(t.date))} · ${esc(txnSubtitle(t))}</div></div>
+    <div class="grow"><div class="t">${esc(txnTitle(t))}${nFiles ? ` <span class="chip">📎${nFiles}</span>` : ''}</div><div class="s">${esc(fmtDate(t.date))} · ${esc(txnSubtitle(t))}</div>${t.description ? `<div class="d">${esc(t.description)}</div>` : ''}</div>
     <div class="r amt ${cls}">${s ? money(s, true) : money(t.amount)}</div></div>`;
 }
 function txnList(txns, limit) {
@@ -1084,14 +1318,14 @@ function rentStatus(l, ym) {
   if (due && due === today()) return { paid, chip: '<span class="chip warn">Due today</span>', state: 'due' };
   return { paid, chip: '<span class="chip">Upcoming</span>', state: 'upcoming' };
 }
-function rentRollRows(ym) {
-  const rows = S.leases.filter((l) => dueDate(l, ym)).map((l) => ({ l, st: rentStatus(l, ym) }));
+function rentRollRows(ym, propertyId) {
+  const rows = S.leases.filter((l) => dueDate(l, ym) && (!propertyId || byId('units', l.unitId)?.propertyId === propertyId)).map((l) => ({ l, st: rentStatus(l, ym) }));
   const order = { overdue: 0, due: 1, partial: 2, upcoming: 3, paid: 4 };
   rows.sort((a, b) => order[a.st.state] - order[b.st.state] || propName(byId('units', a.l.unitId)?.propertyId).localeCompare(propName(byId('units', b.l.unitId)?.propertyId)));
   return rows;
 }
-function rentRollHtml(ym) {
-  const rows = rentRollRows(ym);
+function rentRollHtml(ym, propertyId) {
+  const rows = rentRollRows(ym, propertyId);
   if (!rows.length) return '<div class="list"><div class="empty">No rent due this month</div></div>';
   return `<div class="list">${rows.map(({ l, st }) => {
     const u = byId('units', l.unitId);
@@ -1157,7 +1391,7 @@ V.home = () => {
   return {
     title: 'Estate Ledger',
     actions: [{ label: 'Back up', act: 'backup' }],
-    html: `${backupBanner()}
+    html: `${backupBanner()}${(() => { const n = dataIssues().length; return n ? `<a class="banner" href="#/check"><div class="grow">${n} thing${n === 1 ? '' : 's'} to review — duplicate names or partners used outside their property.</div><span class="btn sm">Review</span></a>` : ''; })()}
       <div class="stats">
         <div class="stat"><div class="k">Rent ${esc(monthLabel(ym))}</div><div class="v">${money(collected)}</div><div class="x">of ${money(expected)} expected</div></div>
         <div class="stat"><div class="k">Outstanding rent</div><div class="v ${outstanding > 0 ? 'neg' : ''}">${money(outstanding)}</div><div class="x">all leases</div></div>
@@ -1194,6 +1428,11 @@ V.property = (id) => {
   const tx = S.txns.filter((t) => t.propertyId === id);
   const { pos } = partnerPositions(tx);
   const plan = settlePlan(pos);
+  const owners = ownerIds(id);
+  const balIds = [...owners, ...Object.keys(pos).filter((pid) => !owners.includes(pid) && Math.abs(pos[pid]) > 0.005)];
+  const outsiders = balIds.filter((pid) => !owners.includes(pid));
+  const accs = S.accounts.filter((a) => a.propertyId === id);
+  const nTenants = S.tenants.filter((t) => tenantPropertyIds(t.id).has(id)).length;
   return {
     title: p.name, back: '#/properties',
     actions: [{ label: 'Edit', act: 'editProperty', id }],
@@ -1218,9 +1457,14 @@ V.property = (id) => {
           <div class="s">${l ? esc(tenantName(l.tenantId)) + ' · ' + money(l.rent) + '/mo' : esc([u.layout, u.size].filter(Boolean).join(' · ') || 'No tenant')}</div></div>
           ${l && leaseStats(l).balance > 0 ? `<span class="chip bad">${money(leaseStats(l).balance)} due</span>` : ''}</a>`;
       }).join('')}</div>` : '<div class="list"><div class="empty">No units</div></div>'}
-      ${(p.owners || []).length > 1 || Object.keys(pos).length > 1 ? `
+      <div class="btns"><a class="btn sec" href="#/rentals/tenants?p=${id}">Tenants (${nTenants})</a><a class="btn sec" href="#/rentals/leases?p=${id}">Leases</a></div>
+      <h2>Common account${accs.length === 1 ? '' : 's'} <a class="h-act" href="javascript:void 0" data-act="newAccount" data-property-id="${id}">+ Account</a></h2>
+      ${accs.length ? `<div class="list">${accs.map((a) => `<a class="row" href="#/ledger?v=a:${a.id}"><div class="grow"><div class="t">${esc(a.name)}</div><div class="s">${esc(a.details || 'Rent in, mortgage & expenses out')}</div></div><div class="r amt">${money(accountBalance(a.id))}</div></a>`).join('')}</div>`
+        : `<div class="list"><div class="empty small">No account for this property yet. Add one (e.g. the bank account rent goes into and the mortgage is paid from), so its income and expenses are shared by the owners automatically.</div></div>`}
+      ${owners.length > 1 || balIds.length > 1 ? `
         <h2>Partner balances (this property) <a class="h-act" href="#/partners?p=${id}">Details</a></h2>
-        <div class="list">${Object.entries(pos).map(([pid, v]) => `<div class="row"><div class="grow">${esc(partnerName(pid))}</div><div class="r amt ${v > 0 ? 'pos' : v < 0 ? 'neg' : ''}">${v > 0 ? 'is owed ' + money(v) : v < 0 ? 'owes ' + money(-v) : 'settled'}</div></div>`).join('')}
+        <div class="list">${balIds.map((pid) => { const v = pos[pid] || 0; return `<div class="row"><div class="grow">${esc(partnerName(pid))}${owners.includes(pid) ? '' : ' <span class="chip warn-owner">not an owner</span>'}</div><div class="r amt ${v > 0.005 ? 'pos' : v < -0.005 ? 'neg' : ''}">${v > 0.005 ? 'is owed ' + money(v) : v < -0.005 ? 'owes ' + money(-v) : 'settled ✓'}</div></div>`; }).join('')}
+        ${outsiders.length ? `<a class="row small" href="#/ledger?p=${id}&amp;v=p:${outsiders[0]}"><div class="grow warn">${esc(outsiders.map(partnerName).join(', '))} ${outsiders.length > 1 ? 'are' : 'is'} not an owner of this property but appear${outsiders.length > 1 ? '' : 's'} in its entries. Tap to review them.</div></a>` : ''}
         ${plan.map((x) => `<div class="row small"><div class="grow">➜ ${esc(partnerName(x.from))} pays ${esc(partnerName(x.to))}</div><div class="amt">${money(x.amount)}</div></div>`).join('')}</div>` : ''}
       <h2>Transactions <a class="h-act" href="#/ledger?p=${id}">All ${tx.length}</a></h2>
       ${txnList(tx, 10)}
@@ -1253,15 +1497,21 @@ V.unit = (id) => {
   };
 };
 
+const leaseProp = (l) => byId('units', l.unitId)?.propertyId;
 V.rentals = (sub, q) => {
   const tab = sub || 'roll';
-  const seg = `<div class="seg">${[['roll', 'Rent roll'], ['leases', 'Leases'], ['tenants', 'Tenants']].map(([k, l]) => `<button data-act="go" data-href="#/rentals/${k}" class="${tab === k ? 'on' : ''}">${l}</button>`).join('')}</div>`;
+  const pf = q.get('p') || '';
+  const keep = (extra = '') => { const nq = new URLSearchParams(extra); if (pf) nq.set('p', pf); const s = nq.toString(); return s ? '?' + s : ''; };
+  const seg = `<div class="seg">${[['roll', 'Rent roll'], ['leases', 'Leases'], ['tenants', 'Tenants']].map(([k, l]) => `<button data-act="go" data-href="#/rentals/${k}${keep()}" class="${tab === k ? 'on' : ''}">${l}</button>`).join('')}</div>
+    ${S.properties.length > 1 ? `<div class="filters"><select id="rpf">${propertyOptions(pf, 'All properties')}</select></div>` : ''}`;
+  const bind = (main) => { const el = $('#rpf', main); if (el) el.onchange = (e) => { const nq = new URLSearchParams(q); if (e.target.value) nq.set('p', e.target.value); else nq.delete('p'); location.hash = `#/rentals/${tab}?${nq}`; }; };
+  const inProp = (l) => !pf || leaseProp(l) === pf;
   if (tab === 'leases') {
     const show = q.get('s') || 'active';
-    const list = S.leases.filter((l) => (show === 'ended' ? l.status === 'ended' : l.status !== 'ended')).sort((a, b) => leaseLabel(a).localeCompare(leaseLabel(b)));
+    const list = S.leases.filter((l) => inProp(l) && (show === 'ended' ? l.status === 'ended' : l.status !== 'ended')).sort((a, b) => propName(leaseProp(a)).localeCompare(propName(leaseProp(b))) || leaseLabel(a).localeCompare(leaseLabel(b)));
     return {
-      title: 'Rentals', actions: [{ label: '+ Lease', act: 'newLease' }],
-      html: `${seg}<div class="seg">${[['active', 'Active'], ['ended', 'Ended']].map(([k, l]) => `<button data-act="go" data-href="#/rentals/leases?s=${k}" class="${show === k ? 'on' : ''}">${l}</button>`).join('')}</div>
+      title: 'Rentals', actions: [{ label: '+ Lease', act: 'newLease' }], bind,
+      html: `${seg}<div class="seg">${[['active', 'Active'], ['ended', 'Ended']].map(([k, l]) => `<button data-act="go" data-href="#/rentals/leases${keep('s=' + k)}" class="${show === k ? 'on' : ''}">${l}</button>`).join('')}</div>
         ${list.length ? `<div class="list">${list.map((l) => {
           const st = leaseStats(l); const u = byId('units', l.unitId);
           return `<a class="row" href="#/lease/${l.id}"><div class="grow"><div class="t">${esc(tenantName(l.tenantId))}</div><div class="s">${esc(u?.name || '')} · ${esc(propName(u?.propertyId))} · ${money(l.rent)}/mo</div><div class="s">${fmtDate(l.startDate)} – ${l.endDate ? fmtDate(l.endDate) : 'open'}</div></div>
@@ -1270,29 +1520,38 @@ V.rentals = (sub, q) => {
     };
   }
   if (tab === 'tenants') {
-    const list = [...S.tenants].sort((a, b) => a.name.localeCompare(b.name));
+    const tenantRow = (t, propId) => {
+      const ls = S.leases.filter((l) => l.tenantId === t.id && (!propId || leaseProp(l) === propId));
+      const act = ls.find((l) => l.status !== 'ended');
+      return `<a class="row" href="#/tenant/${t.id}"><div class="grow"><div class="t">${esc(t.name)}</div><div class="s">${esc([t.phone || t.email, act ? unitName(act.unitId) : ls.length ? 'past tenant' : ''].filter(Boolean).join(' · '))}</div></div></a>`;
+    };
+    const sorted = [...S.tenants].sort((a, b) => a.name.localeCompare(b.name));
+    const groups = [];
+    for (const p of [...S.properties].sort((a, b) => a.name.localeCompare(b.name))) {
+      if (pf && p.id !== pf) continue;
+      const list = sorted.filter((t) => tenantPropertyIds(t.id).has(p.id));
+      if (list.length) groups.push([p.name, list.map((t) => tenantRow(t, p.id))]);
+    }
+    const noLease = sorted.filter((t) => !tenantPropertyIds(t.id).size);
+    if (noLease.length && !pf) groups.push(['No lease yet', noLease.map((t) => tenantRow(t))]);
     return {
-      title: 'Rentals', actions: [{ label: '+ Tenant', act: 'newTenant' }],
-      html: `${seg}${list.length ? `<div class="list">${list.map((t) => {
-        const ls = S.leases.filter((l) => l.tenantId === t.id);
-        const act = ls.find((l) => l.status !== 'ended');
-        return `<a class="row" href="#/tenant/${t.id}"><div class="grow"><div class="t">${esc(t.name)}</div><div class="s">${esc(t.phone || t.email || '')}${act ? ' · ' + esc(unitName(act.unitId)) + ', ' + esc(propName(byId('units', act.unitId)?.propertyId)) : ls.length ? ' · past tenant' : ''}</div></div></a>`;
-      }).join('')}</div>` : '<div class="empty">No tenants</div>'}`,
+      title: 'Rentals', actions: [{ label: '+ Tenant', act: 'newTenant' }], bind,
+      html: `${seg}${groups.length ? groups.map(([h, rows]) => `<h2>${esc(h)} (${rows.length})</h2><div class="list">${rows.join('')}</div>`).join('') : '<div class="empty">No tenants</div>'}`,
     };
   }
   const ym = q.get('m') || thisMonth();
-  const rows = rentRollRows(ym);
+  const rows = rentRollRows(ym, pf);
   const expected = sum(rows, (r) => r.l.rent);
   const collected = sum(rows, (r) => r.st.paid);
   return {
-    title: 'Rentals', actions: [{ label: '+ Lease', act: 'newLease' }],
+    title: 'Rentals', actions: [{ label: '+ Lease', act: 'newLease' }], bind,
     html: `${seg}
       <div class="card pad" style="display:flex;align-items:center;gap:8px">
-        <a class="btn sec sm" href="#/rentals/roll?m=${addMonths(ym, -1)}">‹</a>
+        <a class="btn sec sm" href="#/rentals/roll${keep('m=' + addMonths(ym, -1))}">‹</a>
         <div style="flex:1;text-align:center"><div style="font-weight:600">${esc(monthLabel(ym))}</div><div class="small muted">${money(collected)} collected of ${money(expected)}</div></div>
-        <a class="btn sec sm" href="#/rentals/roll?m=${addMonths(ym, 1)}">›</a>
+        <a class="btn sec sm" href="#/rentals/roll${keep('m=' + addMonths(ym, 1))}">›</a>
       </div>
-      ${rentRollHtml(ym)}`,
+      ${rentRollHtml(ym, pf)}`,
   };
 };
 
@@ -1354,6 +1613,7 @@ V.tenant = (id) => {
     title: t.name, back: '#/rentals/tenants',
     actions: [{ label: 'Edit', act: 'editTenant', id }],
     html: `<div class="card pad" style="margin-top:12px">
+        ${tenantWhere(id) ? `<div class="small muted">${esc(tenantWhere(id))}</div>` : ''}
         ${t.phone ? `<div>📞 <a href="tel:${esc(t.phone.replace(/[^+\d]/g, ''))}">${esc(t.phone)}</a> · <a href="sms:${esc(t.phone.replace(/[^+\d]/g, ''))}">SMS</a></div>` : ''}
         ${t.email ? `<div>✉️ <a href="mailto:${esc(t.email)}">${esc(t.email)}</a></div>` : ''}
         ${t.idRef ? `<div class="small muted">ID: ${esc(t.idRef)}</div>` : ''}
@@ -1387,12 +1647,12 @@ function ledgerFilter(q) {
     if (k && KINDS[k] && t.kind !== k) return false;
     if (vv) {
       const hit = vv.t === 'a' ? (viaKey(t.via) === v || t.accountId === vv.id || t.toAccountId === vv.id)
-        : (viaKey(t.via) === v || t.partnerId === vv.id || t.toPartnerId === vv.id || (t.split || []).some((x) => x.partnerId === vv.id));
+        : (viaKey(t.via) === v || t.partnerId === vv.id || t.toPartnerId === vv.id || t.handledBy === vv.id || (t.split || []).some((x) => x.partnerId === vv.id));
       if (!hit) return false;
     }
     if (from && t.date < from) return false;
     if (to && t.date > to) return false;
-    if (s && !(`${txnTitle(t)} ${txnSubtitle(t)} ${t.amount}`.toLowerCase().includes(s))) return false;
+    if (s && !(`${txnTitle(t)} ${txnSubtitle(t)} ${t.description || ''} ${t.amount}`.toLowerCase().includes(s))) return false;
     return true;
   });
   return { list, p, k, v, per, from, to, s };
@@ -1411,7 +1671,7 @@ V.ledger = (sub, q) => {
         <select data-q="k">${opt('', 'All types', f.k)}${opt('in', 'Money in', f.k)}${opt('out', 'Money out', f.k)}${opt('partner', 'Partner money', f.k)}${Object.entries(KINDS).map(([key, v]) => opt(key, v.short, f.k)).join('')}</select>
         <select data-q="v">${opt('', 'All accounts & partners', f.v)}${viaOptions(f.v)}</select>
         <select data-q="per">${opt('all', 'All dates', f.per)}${opt('m', 'This month', f.per)}${opt('lm', 'Last month', f.per)}${opt('y', 'This year', f.per)}${opt('ly', 'Last year', f.per)}${opt('custom', 'Custom dates…', f.per)}</select>
-        ${f.per === 'custom' ? `<input type="date" data-q="from" value="${esc(f.from)}"><input type="date" data-q="to" value="${esc(f.to)}">` : ''}
+        ${f.per === 'custom' ? `<div class="date-range"><label>From<input type="date" data-date="from" value="${esc(f.from)}"></label><label>To<input type="date" data-date="to" value="${esc(f.to)}"></label><button type="button" class="btn sm" id="applyDates">Apply</button></div>` : ''}
         <input type="search" data-q="q" value="${esc(f.s)}" placeholder="Search">
       </div>
       <div class="stats" style="grid-template-columns:1fr 1fr 1fr">
@@ -1421,11 +1681,26 @@ V.ledger = (sub, q) => {
       </div>
       ${f.list.length ? Object.entries(groups).map(([d, ts]) => `<div class="date-head">${esc(fmtDate(d))}</div><div class="list">${ts.map(txnRow).join('')}</div>`).join('') : '<div class="empty">No transactions match</div>'}`,
     bind(main) {
+      // Date pickers: iOS fires "change" on every turn of the wheel, so only apply when the picker is done
+      // (focus leaves both date fields) or when Apply is tapped — never re-render while one is open.
+      const dates = $$('[data-date]', main);
+      const applyDates = () => {
+        const nq = new URLSearchParams(location.hash.split('?')[1] || '');
+        let from = dates[0].value, to = dates[1].value;
+        if (from && to && from > to) [from, to] = [to, from];
+        for (const [k, v] of [['from', from], ['to', to]]) if (v) nq.set(k, v); else nq.delete(k);
+        const h = '#/ledger?' + nq.toString();
+        if (h !== location.hash) { history.replaceState(null, '', h); render(); }
+      };
+      dates.forEach((el) => el.addEventListener('blur', () => setTimeout(() => { if (!dates.includes(document.activeElement) && $('#applyDates')) applyDates(); }, 150)));
+      const ab = $('#applyDates', main);
+      if (ab) ab.onclick = applyDates;
       $$('[data-q]', main).forEach((el) => {
         const ev = el.type === 'search' ? 'input' : 'change';
         el.addEventListener(ev, () => {
           const nq = new URLSearchParams(q);
           if (el.value) nq.set(el.dataset.q, el.value); else nq.delete(el.dataset.q);
+          if (el.dataset.q === 'per' && el.value === 'custom' && !nq.get('from') && !nq.get('to')) { nq.set('from', thisMonth() + '-01'); nq.set('to', today()); }
           history.replaceState(null, '', '#/ledger?' + nq.toString());
           if (el.type === 'search') { clearTimeout(V._st); V._st = setTimeout(() => { render(); const s = $('[data-q=q]'); if (s) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); } }, 350); }
           else render();
@@ -1441,7 +1716,10 @@ V.partners = (sub, q) => {
   const tx = p ? S.txns.filter((t) => t.propertyId === p) : S.txns;
   const { pos, br } = partnerPositions(tx);
   const plan = settlePlan(pos);
-  const ids = S.partners.map((x) => x.id).filter((id) => pos[id] !== undefined || br[id]);
+  const owners = ownerIds(p);
+  const ids = S.partners.map((x) => x.id).filter((id) => (p ? owners.includes(id) || Math.abs(pos[id] || 0) > 0.005 : pos[id] !== undefined || br[id]));
+  const owns = (pid) => S.properties.filter((x) => x.owners?.some((o) => o.partnerId === pid)).map((x) => `${x.name} ${sum(x.owners.filter((o) => o.partnerId === pid), (o) => num(o.pct))}%`);
+  const shown = p ? S.partners.filter((x) => owners.includes(x.id)) : S.partners;
   const rows = [
     ['Paid expenses personally', 'paidPersonally'], ['Received income personally', 'receivedPersonally'],
     ['Put into common account', 'contributed'], ['Took from common account', 'withdrawn'],
@@ -1453,15 +1731,15 @@ V.partners = (sub, q) => {
     actions: [{ label: '+ Partner', act: 'newPartner' }],
     html: `<div class="filters"><select id="pf">${propertyOptions(p, 'All properties')}</select></div>
       <h2>Who owes whom</h2>
-      <div class="list">${ids.length ? ids.map((id) => { const v = pos[id] || 0; return `<div class="row"><div class="grow"><div class="t">${esc(partnerName(id))}</div></div><div class="r amt ${v > 0.005 ? 'pos' : v < -0.005 ? 'neg' : ''}">${v > 0.005 ? 'is owed ' + money(v) : v < -0.005 ? 'owes ' + money(-v) : 'settled ✓'}</div></div>`; }).join('') : '<div class="empty">No partner activity yet</div>'}</div>
+      <div class="list">${ids.length ? ids.map((id) => { const v = pos[id] || 0; return `<div class="row"><div class="grow"><div class="t">${esc(partnerName(id))}${p && !owners.includes(id) ? ' <span class="chip warn-owner">not an owner</span>' : ''}</div></div><div class="r amt ${v > 0.005 ? 'pos' : v < -0.005 ? 'neg' : ''}">${v > 0.005 ? 'is owed ' + money(v) : v < -0.005 ? 'owes ' + money(-v) : 'settled ✓'}</div></div>`; }).join('') : '<div class="empty">No partner activity yet</div>'}</div>
       ${plan.length ? `<h2>Suggested settlement</h2><div class="list">${plan.map((x) => `<div class="row"><div class="grow">${esc(partnerName(x.from))} → ${esc(partnerName(x.to))}</div><div class="amt">${money(x.amount)}</div><button class="btn sm" data-act="newTxn" data-kind="settlement" data-partner-id="${x.from}" data-to-partner-id="${x.to}" data-amount="${x.amount}" data-property-id="${p}">Record</button></div>`).join('')}</div>` : ''}
       <div class="hint" style="margin:8px 16px">Balances compare what each partner actually paid, received, put in or took out against their ownership share. “Is owed” means the others should pay this partner. Record a settlement (or a contribution/withdrawal) to square up.</div>
       ${ids.length ? `<h2>Breakdown</h2><div class="card scroll-x"><table class="t"><thead><tr><th></th>${ids.map((id) => `<th class="n">${esc(partnerName(id))}</th>`).join('')}</tr></thead><tbody>
         ${rows.map(([label, key]) => `<tr><td>${label}</td>${ids.map((id) => `<td class="n">${money(br[id]?.[key] || 0)}</td>`).join('')}</tr>`).join('')}
         <tr class="tot"><td>Net position</td>${ids.map((id) => `<td class="n ${pos[id] > 0.005 ? 'pos' : pos[id] < -0.005 ? 'neg' : ''}">${money(pos[id] || 0, true)}</td>`).join('')}</tr>
       </tbody></table></div>` : ''}
-      <h2>All partners</h2>
-      <div class="list">${S.partners.map((x) => `<div class="row nav" data-act="editPartner" data-id="${x.id}"><div class="grow"><div class="t">${esc(x.name)}${x.isSelf ? ' <span class="chip">me</span>' : ''}</div><div class="s">${esc([x.phone, x.email].filter(Boolean).join(' · '))}</div></div></div>`).join('')}</div>
+      <h2>${p ? 'Owners of ' + esc(propName(p)) : 'All partners'}</h2>
+      <div class="list">${shown.map((x) => `<div class="row nav" data-act="editPartner" data-id="${x.id}"><div class="grow"><div class="t">${esc(x.name)}${x.isSelf ? ' <span class="chip">me</span>' : ''}${S.partners.some((y) => y.id !== x.id && normName(y.name) === normName(x.name)) ? ' <span class="chip warn-owner">duplicate name</span>' : ''}</div><div class="s">${esc(owns(x.id).join(' · ') || 'Owns no property')}${x.phone || x.email ? ' · ' + esc([x.phone, x.email].filter(Boolean).join(' · ')) : ''}</div></div></div>`).join('') || '<div class="empty">No owners set</div>'}</div>
       <div class="btns"><a class="btn sec" href="#/ledger?k=partner${p ? '&p=' + p : ''}">Partner transactions</a></div>`,
     bind(main) {
       $('#pf', main).onchange = (e) => { location.hash = '#/partners' + (e.target.value ? '?p=' + e.target.value : ''); };
@@ -1473,7 +1751,7 @@ V.accounts = () => ({
   title: 'Accounts', back: '#/more',
   actions: [{ label: '+ Account', act: 'newAccount' }],
   html: `<div class="hint" style="margin:14px 16px 8px">Common accounts are shared money pots: a joint bank account, a property's rent account, or a cash box. Partners' personal money is not an account — choose the partner instead when recording.</div>
-    ${S.accounts.length ? `<div class="list">${S.accounts.map((a) => { const bal = accountBalance(a.id); return `<div class="row"><div class="grow" data-act="editAccount" data-id="${a.id}"><div class="t">${esc(a.name)}</div><div class="s">${esc(a.details || '')} ${(a.owners || []).map((o) => esc(partnerName(o.partnerId)) + ' ' + o.pct + '%').join(', ')}</div></div><div class="r amt ${bal < 0 ? 'neg' : ''}">${money(bal)}</div><a class="btn sm sec" href="#/ledger?v=a:${a.id}">Ledger</a></div>`; }).join('')}</div>` : '<div class="empty">No accounts yet</div>'}
+    ${S.accounts.length ? `<div class="list">${S.accounts.map((a) => { const bal = accountBalance(a.id); return `<div class="row"><div class="grow" data-act="editAccount" data-id="${a.id}"><div class="t">${esc(a.name)}</div><div class="s">${esc([a.propertyId ? propName(a.propertyId) : 'Shared', a.details].filter(Boolean).join(' · '))} · ${(a.owners || []).map((o) => esc(partnerName(o.partnerId)) + ' ' + o.pct + '%').join(', ')}</div></div><div class="r amt ${bal < 0 ? 'neg' : ''}">${money(bal)}</div><a class="btn sm sec" href="#/ledger?v=a:${a.id}">Ledger</a></div>`; }).join('')}</div>` : '<div class="empty">No accounts yet</div>'}
     <div class="btns"><button class="btn sec" data-act="newTxn" data-kind="contribution">Partner puts money in</button><button class="btn sec" data-act="newTxn" data-kind="withdrawal">Partner takes money out</button><button class="btn sec" data-act="newTxn" data-kind="transfer">Transfer</button></div>`,
 });
 
@@ -1570,6 +1848,60 @@ V.reports = (sub, q) => {
   };
 };
 
+// ---------------------------------------------------------------- data check
+// Partner ids an entry refers to (who paid/received, who is split, who handled it).
+function txnPartnerRefs(t) {
+  const ids = [t.partnerId, t.toPartnerId, t.via?.t === 'p' ? t.via.id : '', t.via?.t === 'a' ? t.handledBy : '', ...(t.split || []).map((x) => x.partnerId)];
+  return [...new Set(ids.filter(Boolean))];
+}
+function dataIssues() {
+  const out = [];
+  const dupGroups = (store) => {
+    const g = {};
+    for (const x of S[store]) (g[normName(x.name)] = g[normName(x.name)] || []).push(x);
+    return Object.values(g).filter((l) => l.length > 1);
+  };
+  for (const grp of dupGroups('partners')) {
+    out.push({ kind: 'dup', title: `Partner “${grp[0].name}” exists ${grp.length} times`,
+      copies: grp.map((x) => {
+        const n = S.txns.filter((t) => txnPartnerRefs(t).includes(x.id)).length;
+        const owns = S.properties.filter((p) => p.owners?.some((o) => o.partnerId === x.id)).map((p) => p.name).join(', ');
+        return { id: x.id, store: 'partners', mergeable: !x.isSelf, text: `${x.name}${x.isSelf ? ' (me)' : ''} — ${owns ? 'owns ' + owns : 'owns no property'} · ${plural(n, 'entry', 'entries')}` };
+      }) });
+  }
+  for (const grp of dupGroups('tenants')) {
+    out.push({ kind: 'dup', title: `Tenant “${grp[0].name}” exists ${grp.length} times`,
+      copies: grp.map((x) => ({ id: x.id, store: 'tenants', mergeable: true, text: `${x.name} — ${tenantWhere(x.id) || 'no lease'}${x.phone ? ' · ' + x.phone : ''}` })) });
+  }
+  for (const p of S.properties) {
+    const dup = duplicateOwners(p.owners || []);
+    if (dup.length) out.push({ kind: 'dupOwner', title: `${p.name}: ${dup.join(', ')} listed as owner more than once`, detail: 'The rows will be combined into one (their % added together).', btns: `<button class="btn sm" data-act="fixOwners" data-id="${p.id}">Combine</button>` });
+    const tot = r2(sum(p.owners || [], (o) => num(o.pct)));
+    if ((p.owners || []).length && tot !== 100) out.push({ kind: 'pct', title: `${p.name}: ownership adds up to ${tot}%`, detail: 'Shares are scaled to 100% when splitting, but you may want to correct the %.', btns: `<button class="btn sm sec" data-act="editProperty" data-id="${p.id}">Edit property</button>` });
+    const own = ownerIds(p.id);
+    if (!own.length) continue;
+    const odd = S.txns.filter((t) => t.propertyId === p.id && txnPartnerRefs(t).some((pid) => !own.includes(pid)));
+    if (odd.length) {
+      const who = [...new Set(odd.flatMap((t) => txnPartnerRefs(t).filter((pid) => !own.includes(pid))))].map(partnerName);
+      out.push({ kind: 'outsider', title: `${p.name}: ${odd.length} entr${odd.length === 1 ? 'y uses' : 'ies use'} ${who.join(', ')}, who ${who.length > 1 ? 'are' : 'is'} not an owner`,
+        detail: 'Open each entry and choose an owner of this property (or the common account), unless this was intended.',
+        list: odd.sort((a, b) => b.date.localeCompare(a.date)) });
+    }
+  }
+  return out;
+}
+V.check = () => {
+  const issues = dataIssues();
+  return {
+    title: 'Data check', back: '#/more',
+    html: `<div class="hint" style="margin:14px 16px 8px">Looks for duplicate names, owners listed twice, and entries that use a partner who does not own that property.</div>
+      ${issues.length ? issues.map((x) => `<div class="card pad"><div class="t" style="font-weight:600">${esc(x.title)}</div>${x.detail ? `<div class="small muted" style="margin-top:4px">${esc(x.detail)}</div>` : ''}${x.btns ? `<div class="btns" style="margin:10px 0 0">${x.btns}</div>` : ''}</div>
+        ${x.copies ? `<div class="list">${x.copies.map((c) => `<div class="row"><div class="grow"><div class="s" style="white-space:normal;color:var(--text)">${esc(c.text)}</div></div>${c.mergeable ? `<button class="btn sm sec" data-act="merge" data-store="${c.store}" data-id="${c.id}">Merge into…</button>` : '<span class="chip">keep</span>'}</div>`).join('')}</div>` : ''}
+        ${x.list ? txnList(x.list, 50) : ''}`).join('')
+        : '<div class="card pad" style="text-align:center">✓ No problems found</div>'}`,
+  };
+};
+
 // ---------------------------------------------------------------- more / data / settings / help
 V.more = () => ({
   title: 'More',
@@ -1579,6 +1911,7 @@ V.more = () => ({
       <a class="row" href="#/rentals/tenants"><div class="grow"><div class="t">🧑 Tenants</div></div></a>
       <a class="row" href="#/documents"><div class="grow"><div class="t">📎 Documents</div><div class="s">Statements, screenshots, receipts</div></div></a>
       <a class="row" href="#/reports"><div class="grow"><div class="t">📊 Reports</div><div class="s">Profit &amp; loss by year and property</div></div></a>
+      <a class="row" href="#/check"><div class="grow"><div class="t">🩺 Data check</div><div class="s">${(() => { const n = dataIssues().length; return n ? `${n} thing${n === 1 ? '' : 's'} to review` : 'Duplicates, owners, mixed-up partners'; })()}</div></div></a>
     </div>
     <h2>Data</h2><div class="list">
       <a class="row" href="#/data"><div class="grow"><div class="t">💾 Excel export, backup &amp; restore</div><div class="s">${S.settings.lastBackupAt ? 'Last backup ' + fmtDate(S.settings.lastBackupAt.slice(0, 10)) : 'No backup yet'}</div></div></a>
@@ -1661,8 +1994,10 @@ V.help = () => ({
     <h3>How partner splitting works</h3>
     <ul>
       <li>Each property has owners with a %. Income and expenses for that property are split by those %.</li>
-      <li><b>Paid from</b>: if the common account paid, nobody owes anything. If a partner paid personally, the other owners owe them their share.</li>
-      <li><b>Received into</b>: if a partner collected rent personally, they owe the other owners their share.</li>
+      <li><b>Common / property account</b>: rent deposited into the common account, or the mortgage paid from it, is shared by all owners by % and nobody owes anyone — even if one partner physically collected or paid it. You can note who collected it (“Collected by”); that does not change any balance.</li>
+      <li><b>A partner personally</b>: if a partner paid from their own pocket, the other owners owe them their share. If a partner kept rent personally (did not deposit it), they owe the other owners their share.</li>
+      <li>Link a common account to its property (More › Accounts, or the property page) so that property's entries pick it automatically.</li>
+      <li>Only the owners of a property are offered when you record its entries. <b>More › Data check</b> finds duplicate names (merge them) and entries that use someone who isn't an owner.</li>
       <li><b>Partner took money from common account</b> (personal use): counts against that partner — they owe the others their share of it.</li>
       <li><b>Partner put money in</b>: counts in their favour.</li>
       <li>Use <b>Custom split</b> on any entry to override the % (e.g. 100% for one partner).</li>
@@ -1687,7 +2022,7 @@ function ledgerSheet(txns, name = 'Ledger') {
   const columns = [
     { header: 'Date', type: 'date' }, { header: 'Type' }, { header: 'Category' }, { header: 'Property' }, { header: 'Unit' }, { header: 'Tenant' }, { header: 'Rent month' },
     { header: 'Description' }, { header: 'Money in', type: 'money' }, { header: 'Money out', type: 'money' }, { header: 'Amount', type: 'money' },
-    { header: 'Paid from / received into' }, { header: 'Partner' }, { header: 'To partner' }, { header: 'Account' }, { header: 'To account' }, { header: 'Split' },
+    { header: 'Paid from / received into' }, { header: 'Collected / paid by' }, { header: 'Partner' }, { header: 'To partner' }, { header: 'Account' }, { header: 'To account' }, { header: 'Split' },
     ...ps.map((p) => ({ header: `${p.name} share`, type: 'money' })),
     ...ps.map((p) => ({ header: `${p.name} owed(+)/owes(−)`, type: 'money' })),
     { header: 'Attachments', type: 'number' }, { header: 'Entry ID' },
@@ -1702,7 +2037,7 @@ function ledgerSheet(txns, name = 'Ledger') {
     return [
       t.date, KINDS[t.kind].short, t.category, propName(t.propertyId), unitName(t.unitId), l ? tenantName(l.tenantId) : '', t.period || '',
       t.description, dir === 'in' ? t.amount : '', dir === 'out' ? t.amount : '', t.amount,
-      viaLabel(t.via), t.partnerId ? partnerName(t.partnerId) : '', t.toPartnerId ? partnerName(t.toPartnerId) : '', t.accountId ? accountName(t.accountId) : '', t.toAccountId ? accountName(t.toAccountId) : '',
+      viaLabel(t.via), t.handledBy && t.via?.t === 'a' ? partnerName(t.handledBy) : '', t.partnerId ? partnerName(t.partnerId) : '', t.toPartnerId ? partnerName(t.toPartnerId) : '', t.accountId ? accountName(t.accountId) : '', t.toAccountId ? accountName(t.toAccountId) : '',
       SPLIT_KINDS.includes(t.kind) ? Object.entries(shares).map(([pid, f]) => `${partnerName(pid)} ${r2(f * 100)}%`).join(', ') + (t.split ? ' (custom)' : '') : '',
       ...ps.map((p) => splitAmt(p.id)),
       ...ps.map((p) => { const v = r2((cap[p.id] || 0) - (shares[p.id] || 0) * total); return v ? v : ''; }),
@@ -1904,7 +2239,14 @@ const ACTIONS = {
   editTenant: (d) => tenantForm(d.id),
   newPartner: () => partnerForm(),
   editPartner: (d) => partnerForm(d.id),
-  newAccount: () => accountForm(),
+  merge: (d) => mergeForm(d.store, d.id),
+  fixOwners: async (d) => {
+    const p = byId('properties', d.id);
+    const out = [];
+    for (const o of p.owners || []) { const hit = out.find((x) => x.partnerId === o.partnerId); if (hit) hit.pct = r2(num(hit.pct) + num(o.pct)); else out.push({ ...o }); }
+    p.owners = out; await save('properties', p); toast('Combined'); render();
+  },
+  newAccount: (d) => accountForm(null, d.propertyId ? { propertyId: d.propertyId, name: propName(d.propertyId) + ' account' } : {}),
   editAccount: (d) => accountForm(d.id),
   uploadDoc: (d) => uploadDocForm(d.linkType || 'general', d.id),
   exportAll: () => exportAll().catch((e) => alert('Export failed: ' + e.message)),
