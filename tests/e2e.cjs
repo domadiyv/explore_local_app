@@ -84,16 +84,18 @@ function section(name) { console.log('\n' + name); }
       root = NEW_ROOT;
       await page.reload();
       // the new service worker installs in the background, takes over and reloads the page by itself
+      const newV = /VERSION = '([^']+)'/.exec(fs.readFileSync(path.join(NEW_ROOT, 'sw.js'), 'utf8'))[1];
+      const newScripts = (fs.readFileSync(path.join(NEW_ROOT, 'index.html'), 'utf8').match(/<script /g) || []).length;
       let upgraded = false;
-      for (let i = 0; i < 40 && !upgraded; i++) {
+      for (let i = 0; i < 60 && !upgraded; i++) {
         await page.waitForTimeout(250);
-        upgraded = await page.evaluate(() => typeof dataIssues === 'function').catch(() => false);
+        upgraded = await page.evaluate(async ([v, n]) => (await caches.keys()).join() === v && document.scripts.length === n && typeof render === 'function', [newV, newScripts]).catch(() => false);
       }
       ok(upgraded, 'app reloaded itself into the new version');
       await page.waitForTimeout(500);
       await page.waitForSelector('.stats');
       const sw = await ev(async () => (await caches.keys()).join(','));
-      ok(sw.includes('estate-ledger-v3') && !sw.includes('v2'), 'service worker switched to the new version cache: ' + sw);
+      ok(sw === newV, 'service worker switched to the new version cache only: ' + sw);
       ok(await ev(() => typeof dataIssues === 'function'), 'new app code is running after the update');
       const after = await ev(() => ({ n: S.txns.length, bal: accountBalance('acc_old') }));
       eq(after, before, 'all transactions and balances survive the update');

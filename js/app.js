@@ -1630,7 +1630,7 @@ V.tenant = (id) => {
 
 // ---------------------------------------------------------------- ledger
 function ledgerFilter(q) {
-  const p = q.get('p') || '', k = q.get('k') || '', v = q.get('v') || '', per = q.get('per') || 'all', s = (q.get('q') || '').toLowerCase();
+  const p = q.get('p') || '', k = q.get('k') || '', v = q.get('v') || '', per = q.get('per') || 'all', s = (q.get('q') || '').toLowerCase(), imp = q.get('imp') || '';
   let from = '', to = '';
   const d = today(), y = d.slice(0, 4), m = d.slice(0, 7);
   if (per === 'm') { from = m + '-01'; to = m + '-31'; }
@@ -1641,6 +1641,7 @@ function ledgerFilter(q) {
   const vv = parseVia(v);
   const list = S.txns.filter((t) => {
     if (p && t.propertyId !== p) return false;
+    if (imp && t.importId !== imp) return false;
     if (k === 'in' && KINDS[t.kind].dir !== 'in') return false;
     if (k === 'out' && KINDS[t.kind].dir !== 'out') return false;
     if (k === 'partner' && !['contribution', 'withdrawal', 'settlement'].includes(t.kind)) return false;
@@ -1911,6 +1912,7 @@ V.more = () => ({
       <a class="row" href="#/rentals/tenants"><div class="grow"><div class="t">🧑 Tenants</div></div></a>
       <a class="row" href="#/documents"><div class="grow"><div class="t">📎 Documents</div><div class="s">Statements, screenshots, receipts</div></div></a>
       <a class="row" href="#/reports"><div class="grow"><div class="t">📊 Reports</div><div class="s">Profit &amp; loss by year and property</div></div></a>
+      <a class="row" href="#/import"><div class="grow"><div class="t">📥 Import transactions</div><div class="s">Bulk-add past entries from Excel / CSV</div></div></a>
       <a class="row" href="#/check"><div class="grow"><div class="t">🩺 Data check</div><div class="s">${(() => { const n = dataIssues().length; return n ? `${n} thing${n === 1 ? '' : 's'} to review` : 'Duplicates, owners, mixed-up partners'; })()}</div></div></a>
     </div>
     <h2>Data</h2><div class="list">
@@ -1925,6 +1927,9 @@ V.data = () => ({
   html: `<h2>Excel</h2>
     <div class="card pad"><div class="small muted" style="margin-bottom:10px">One .xlsx workbook with sheets for summary, properties, units, tenants, leases, the full ledger (with each partner's split), partner balances, accounts, rent roll and yearly P&amp;L. Opens in Excel, Numbers and Google Sheets.</div>
       <button class="btn block" data-act="exportAll">Export everything to Excel</button></div>
+    <h2>Import</h2>
+    <div class="card pad"><div class="small muted" style="margin-bottom:10px">Add many past transactions at once from an Excel template with dropdown lists, or from your own spreadsheet / bank export (CSV).</div>
+      <a class="btn sec block" href="#/import">Import transactions…</a></div>
     <h2>Backup</h2>
     <div class="card pad"><div class="small muted" style="margin-bottom:10px">A backup is a single .zip with all your data and uploaded documents. Save it to Files / iCloud Drive, or send it to yourself. You can restore it on this or another iPhone/computer.</div>
       <button class="btn block" data-act="backup">Create full backup (with documents)</button>
@@ -2007,6 +2012,14 @@ V.help = () => ({
     <ul>
       <li>Each lease charges its monthly rent on the due day. Rent payments (income with category “Rent” linked to the lease) reduce the balance.</li>
       <li>Security deposits are tracked separately as money owed back to the tenant: record received, kept (deductions) and refunded.</li>
+    </ul>
+    <h3>Importing past entries</h3>
+    <ul>
+      <li><b>More › Import transactions › Download template</b>. It's an Excel file whose columns have dropdown lists with your own properties, units, tenants, partners and accounts, so you pick instead of typing. Add those in the app first.</li>
+      <li>Fill it in (Excel, Numbers or Google Sheets), save as .xlsx or CSV, then <b>Choose file to import</b>.</li>
+      <li>You get a preview. Anything the app can't match exactly (a typo, a different spelling) is listed under <b>Match names</b> with a dropdown to pick the right one. Rows with problems are shown and not imported. Entries already in the app are detected as duplicates.</li>
+      <li>Your own spreadsheet or a bank export works too: match its columns with the dropdowns, and use “For empty cells, use” to set the property and account for every row.</li>
+      <li>Changed your mind? <b>Undo</b> removes everything from that import.</li>
     </ul>
     <h3>Tips</h3>
     <ul>
@@ -2288,6 +2301,7 @@ function render() {
   $('#backBtn').hidden = !currentBack;
   $('#topActions').innerHTML = (res.actions || []).map((a, i) => `<button data-top="${i}">${esc(a.label)}</button>`).join('');
   $$('#topActions [data-top]').forEach((b) => (b.onclick = () => { const a = res.actions[+b.dataset.top]; ACTIONS[a.act]({ id: a.id, linkType: a.linkType }); }));
+  $('#fab').hidden = name === 'import';
   const tab = TAB_OF[name] || 'more';
   $$('.tabbar a').forEach((a) => a.classList.toggle('active', a.dataset.tab === tab));
   if (res.bind) res.bind(main);

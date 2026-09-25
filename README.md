@@ -15,6 +15,7 @@ A web app you install on your iPhone from Safari ("Add to Home Screen"). It runs
   - Custom split on any entry.
   - Shows who owes whom, with a suggested settlement.
 - **Per-property people**: entries only offer the owners of their property, and tenants are grouped by property. **More › Data check** finds duplicate partners/tenants (and merges them), owners listed twice, and entries that use someone who isn't an owner.
+- **Bulk import** (More › Import transactions): a personal Excel template with dropdown lists of your properties, units, tenants, partners, accounts, types and categories. Also accepts your own .xlsx/CSV or bank exports, where you match the columns and any unknown names with dropdowns. Shows a preview with problems and duplicates, and every import can be undone.
 - **Attachments**: bank statements, screenshots, receipts and PDFs on any entry, property, lease or tenant.
 - **Excel export** (.xlsx, 11 sheets): summary, properties, units, tenants, leases, full ledger with each partner's split, partner balances, accounts, rent roll, P&L and documents.
 - **Backup & restore**: one .zip holding all data and documents. Save it to Files/iCloud and restore it on any device.
@@ -45,6 +46,7 @@ End-to-end tests (real Chromium through Playwright, covering every entry type, p
 ```
 npm i -g playwright
 NODE_PATH=$(npm root -g) node tests/e2e.cjs
+NODE_PATH=$(npm root -g) node tests/import.cjs   # bulk import; uses LibreOffice (soffice) too if installed
 # also test upgrading with existing data from an older copy of the app:
 git worktree add /tmp/old <old-commit> && NODE_PATH=$(npm root -g) OLD_ROOT=/tmp/old node tests/e2e.cjs
 ```
