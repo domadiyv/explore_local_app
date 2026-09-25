@@ -1,6 +1,6 @@
 // Service worker: caches the app so it runs fully offline after the first visit.
 // Bump VERSION whenever any app file changes so phones pick up the update.
-const VERSION = 'estate-ledger-v2';
+const VERSION = 'estate-ledger-v3';
 const ASSETS = [
   './',
   './index.html',
@@ -15,7 +15,8 @@ const ASSETS = [
 ];
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(VERSION).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  // cache: 'reload' skips the browser's HTTP cache so a new version never stores stale files.
+  event.waitUntil(caches.open(VERSION).then((c) => c.addAll(ASSETS.map((u) => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (event) => {
