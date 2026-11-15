@@ -517,6 +517,21 @@ function section(name) { console.log('\n' + name); }
     eq(await positions('Solo'), {}, 'solo owner owes nobody');
     await ev(async (d) => { await DB.replaceAll({ ...JSON.parse(d), settings: [{ id: 'main', ...S.settings }] }); await loadAll(); }, saved);
 
+    section('Lease past its end date shows as Expired, not Upcoming');
+    await ev(async () => { await save('leases', { id: 'l_exp', unitId: S.units[0].id, tenantId: S.tenants[0].id, startDate: '2025-08-01', endDate: '2025-12-31', status: 'active', rent: 2610, dueDay: 1 }); });
+    await go('#/lease/l_exp');
+    const lp = await page.textContent('#main');
+    ok(lp.includes('Expired') && !lp.includes('Upcoming'), 'lease page chip says Expired');
+    ok(lp.includes('This lease ended on') && !!(await page.$('[data-act=endLease]')), 'explains it and still offers End lease');
+    eq(await ev(() => leaseStats(byId('leases', 'l_exp')).months.length), 5, 'rent charged only Aug–Dec 2025');
+    await go('#/rentals/leases?s=ended');
+    ok((await page.$$('#main a[href="#/lease/l_exp"]')).length === 1, 'listed under Leases › Ended');
+    await go('#/rentals/leases?s=active');
+    ok((await page.$$('#main a[href="#/lease/l_exp"]')).length === 0, 'not listed under Leases › Active');
+    await go('#/unit/' + (await ev(() => S.units[0].id)));
+    ok((await page.textContent('#main')).includes('Expired'), 'unit page lists it as Expired');
+    await ev(async () => { await remove('leases', 'l_exp'); });
+
     section('Pages render without errors');
     for (const hsh of ['#/home', '#/properties', '#/property/' + maple, '#/unit/' + (await ev(() => S.units[0].id)), '#/rentals', '#/rentals/leases', '#/rentals/tenants', '#/lease/' + (await ev(() => S.leases[0].id)), '#/tenant/' + (await ev(() => S.tenants[0].id)), '#/ledger', '#/partners', '#/accounts', '#/documents', '#/reports', '#/more', '#/data', '#/settings', '#/help', '#/check']) {
       await go(hsh);

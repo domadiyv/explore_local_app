@@ -126,7 +126,7 @@ function viaLabel(v) {
 }
 function leaseLabel(l) {
   if (!l) return '';
-  return `${tenantName(l.tenantId) || 'Tenant'} · ${unitName(l.unitId)}${l.status === 'ended' ? ' (ended)' : ''}`;
+  return `${tenantName(l.tenantId) || 'Tenant'} · ${unitName(l.unitId)}${leaseIsCurrent(l) ? '' : ' (ended)'}`;
 }
 function txnTitle(t) {
   const k = KINDS[t.kind];
@@ -322,6 +322,17 @@ function leaseStats(l) {
 }
 function paidForPeriod(l, ym) {
   return sum(S.txns.filter((t) => t.leaseId === l.id && isRentPayment(t) && (t.period || t.date.slice(0, 7)) === ym), (t) => t.amount);
+}
+// 'ended' (closed with End lease), 'expired' (end date passed, not closed yet), 'upcoming' or 'active'.
+function leaseState(l, date = today()) {
+  if (l.status === 'ended') return 'ended';
+  if (l.endDate && l.endDate < date) return 'expired';
+  if (l.startDate > date) return 'upcoming';
+  return 'active';
+}
+const leaseIsCurrent = (l) => ['active', 'upcoming'].includes(leaseState(l));
+function leaseChip(l) {
+  return { ended: '<span class="chip">Ended</span>', expired: '<span class="chip">Expired</span>', upcoming: '<span class="chip warn">Upcoming</span>', active: '<span class="chip ok">Active</span>' }[leaseState(l)];
 }
 function leaseIsActiveOn(l, date) {
   if (l.status === 'ended') return false;
@@ -823,8 +834,8 @@ function tenantForm(id, onSaved) {
 
 // Where a tenant rents: "Unit · Property" of their current (or latest) lease.
 function tenantWhere(tenantId) {
-  const ls = S.leases.filter((l) => l.tenantId === tenantId).sort((a, b) => (a.status === 'ended') - (b.status === 'ended') || b.startDate.localeCompare(a.startDate));
-  return ls[0] ? `${unitName(ls[0].unitId)} · ${propName(byId('units', ls[0].unitId)?.propertyId)}${ls[0].status === 'ended' ? ' (past)' : ''}` : '';
+  const ls = S.leases.filter((l) => l.tenantId === tenantId).sort((a, b) => leaseIsCurrent(b) - leaseIsCurrent(a) || b.startDate.localeCompare(a.startDate));
+  return ls[0] ? `${unitName(ls[0].unitId)} · ${propName(byId('units', ls[0].unitId)?.propertyId)}${leaseIsCurrent(ls[0]) ? '' : ' (past)'}` : '';
 }
 const tenantPropertyIds = (tenantId) => new Set(S.leases.filter((l) => l.tenantId === tenantId).map((l) => byId('units', l.unitId)?.propertyId).filter(Boolean));
 
@@ -1491,7 +1502,7 @@ V.unit = (id) => {
         ${u.notes ? `<div class="small" style="white-space:pre-wrap;margin-top:6px">${esc(u.notes)}</div>` : ''}</div>
       <div class="btns">${cur ? `<a class="btn" href="#/lease/${cur.id}">Current lease</a>` : ''}<button class="btn ${cur ? 'sec' : ''}" data-act="newLease" data-unit-id="${id}">+ New lease</button><button class="btn sec" data-act="newTxn" data-kind="expense" data-property-id="${u.propertyId}" data-unit-id="${id}">+ Expense</button></div>
       <h2>Leases</h2>
-      ${leases.length ? `<div class="list">${leases.map((l) => `<a class="row" href="#/lease/${l.id}"><div class="grow"><div class="t">${esc(tenantName(l.tenantId))} ${l.status === 'ended' ? '<span class="chip">Ended</span>' : leaseIsActiveOn(l, today()) ? '<span class="chip ok">Active</span>' : '<span class="chip warn">Upcoming</span>'}</div><div class="s">${fmtDate(l.startDate)} – ${l.endDate ? fmtDate(l.endDate) : 'open'} · ${money(l.rent)}/mo</div></div></a>`).join('')}</div>` : '<div class="list"><div class="empty">No leases yet</div></div>'}
+      ${leases.length ? `<div class="list">${leases.map((l) => `<a class="row" href="#/lease/${l.id}"><div class="grow"><div class="t">${esc(tenantName(l.tenantId))} ${leaseChip(l)}</div><div class="s">${fmtDate(l.startDate)} – ${l.endDate ? fmtDate(l.endDate) : 'open'} · ${money(l.rent)}/mo</div></div></a>`).join('')}</div>` : '<div class="list"><div class="empty">No leases yet</div></div>'}
       <h2>Transactions</h2>
       ${txnList(S.txns.filter((t) => t.unitId === id), 20)}`,
   };
@@ -1508,7 +1519,7 @@ V.rentals = (sub, q) => {
   const inProp = (l) => !pf || leaseProp(l) === pf;
   if (tab === 'leases') {
     const show = q.get('s') || 'active';
-    const list = S.leases.filter((l) => inProp(l) && (show === 'ended' ? l.status === 'ended' : l.status !== 'ended')).sort((a, b) => propName(leaseProp(a)).localeCompare(propName(leaseProp(b))) || leaseLabel(a).localeCompare(leaseLabel(b)));
+    const list = S.leases.filter((l) => inProp(l) && (show === 'ended' ? !leaseIsCurrent(l) : leaseIsCurrent(l))).sort((a, b) => propName(leaseProp(a)).localeCompare(propName(leaseProp(b))) || leaseLabel(a).localeCompare(leaseLabel(b)));
     return {
       title: 'Rentals', actions: [{ label: '+ Lease', act: 'newLease' }], bind,
       html: `${seg}<div class="seg">${[['active', 'Active'], ['ended', 'Ended']].map(([k, l]) => `<button data-act="go" data-href="#/rentals/leases${keep('s=' + k)}" class="${show === k ? 'on' : ''}">${l}</button>`).join('')}</div>
@@ -1522,7 +1533,7 @@ V.rentals = (sub, q) => {
   if (tab === 'tenants') {
     const tenantRow = (t, propId) => {
       const ls = S.leases.filter((l) => l.tenantId === t.id && (!propId || leaseProp(l) === propId));
-      const act = ls.find((l) => l.status !== 'ended');
+      const act = ls.find(leaseIsCurrent);
       return `<a class="row" href="#/tenant/${t.id}"><div class="grow"><div class="t">${esc(t.name)}</div><div class="s">${esc([t.phone || t.email, act ? unitName(act.unitId) : ls.length ? 'past tenant' : ''].filter(Boolean).join(' · '))}</div></div></a>`;
     };
     const sorted = [...S.tenants].sort((a, b) => a.name.localeCompare(b.name));
@@ -1572,11 +1583,12 @@ V.lease = (id) => {
     title: tenantName(l.tenantId) || 'Lease', back: '#/rentals/leases',
     actions: [{ label: 'Edit', act: 'editLease', id }],
     html: `<div class="card pad" style="margin-top:12px">
-        <div class="t"><a href="#/tenant/${l.tenantId}">${esc(tenantName(l.tenantId))}</a> ${l.status === 'ended' ? '<span class="chip">Ended</span>' : leaseIsActiveOn(l, today()) ? '<span class="chip ok">Active</span>' : '<span class="chip warn">Upcoming</span>'}</div>
+        <div class="t"><a href="#/tenant/${l.tenantId}">${esc(tenantName(l.tenantId))}</a> ${leaseChip(l)}</div>
         <div class="small"><a href="#/unit/${l.unitId}">${esc(u?.name || '')}</a> · <a href="#/property/${u?.propertyId}">${esc(propName(u?.propertyId))}</a></div>
         <div class="small muted">${fmtDate(l.startDate)} – ${l.endDate ? fmtDate(l.endDate) : 'open-ended'} · ${money(l.rent)}/month, due on day ${l.dueDay}</div>
         ${l.adjustment ? `<div class="small muted">Balance adjustment: ${money(l.adjustment)}</div>` : ''}
         ${l.notes ? `<div class="small" style="white-space:pre-wrap;margin-top:6px">${esc(l.notes)}</div>` : ''}
+        ${leaseState(l) === 'expired' ? `<div class="small warn" style="margin-top:6px">This lease ended on ${fmtDate(l.endDate)}, so no rent is charged after that. Tenant moved out? Tap <b>End lease</b> and settle the deposit. Still living there? Tap <b>Edit</b> and extend the end date.</div>` : ''}
       </div>
       <div class="stats">
         <div class="stat"><div class="k">Rent balance</div><div class="v ${st.balance > 0.005 ? 'neg' : 'pos'}">${st.balance < -0.005 ? money(-st.balance) + ' cr' : money(st.balance)}</div><div class="x">${money(st.rentPaid)} paid of ${money(st.rentDue)}</div></div>
@@ -2086,7 +2098,7 @@ function buildWorkbookSheets() {
   sheets.push({
     name: 'Leases',
     columns: [{ header: 'Tenant' }, { header: 'Property' }, { header: 'Unit' }, { header: 'Start', type: 'date' }, { header: 'End', type: 'date' }, { header: 'Status' }, { header: 'Monthly rent', type: 'money' }, { header: 'Due day', type: 'number' }, { header: 'Rent charged to date', type: 'money' }, { header: 'Rent paid', type: 'money' }, { header: 'Rent balance', type: 'money' }, { header: 'Deposit agreed', type: 'money' }, { header: 'Deposit received', type: 'money' }, { header: 'Deposit kept', type: 'money' }, { header: 'Deposit refunded', type: 'money' }, { header: 'Deposit held', type: 'money' }, { header: 'Notes' }],
-    rows: S.leases.map((l) => { const st = leaseStats(l); const u = byId('units', l.unitId); return [tenantName(l.tenantId), propName(u?.propertyId), u?.name, l.startDate, l.endDate, l.status === 'ended' ? 'Ended' : leaseIsActiveOn(l, today()) ? 'Active' : 'Upcoming', l.rent, l.dueDay, st.rentDue, st.rentPaid, st.balance, l.deposit, st.depIn, st.depApplied, st.depOut, st.depHeld, l.notes]; }),
+    rows: S.leases.map((l) => { const st = leaseStats(l); const u = byId('units', l.unitId); return [tenantName(l.tenantId), propName(u?.propertyId), u?.name, l.startDate, l.endDate, { ended: 'Ended', expired: 'Expired', upcoming: 'Upcoming', active: 'Active' }[leaseState(l)], l.rent, l.dueDay, st.rentDue, st.rentPaid, st.balance, l.deposit, st.depIn, st.depApplied, st.depOut, st.depHeld, l.notes]; }),
   });
   sheets.push(ledgerSheet(S.txns));
   // partner balances

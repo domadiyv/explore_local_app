@@ -49,7 +49,7 @@ const FIELD = Object.fromEntries(IMPORT_FIELDS.map((f) => [f.key, f]));
 const unitLabel = (u) => `${propName(u.propertyId)} › ${u.name}`;
 function leaseImportLabel(l) {
   const u = byId('units', l.unitId);
-  return `${tenantName(l.tenantId) || 'Tenant'} · ${u ? unitLabel(u) : ''}${l.status === 'ended' ? ' (ended)' : ''}`;
+  return `${tenantName(l.tenantId) || 'Tenant'} · ${u ? unitLabel(u) : ''}${leaseIsCurrent(l) ? '' : ' (ended)'}`;
 }
 const personallyLabel = (p) => `${p.name} (personally)`;
 const allCategories = () => [...new Set([...Object.values(KINDS).flatMap((k) => k.cats), ...S.txns.map((t) => t.category).filter(Boolean)])];
@@ -225,7 +225,7 @@ function leaseCands(propertyId) {
   const ls = S.leases.filter((l) => !propertyId || byId('units', l.unitId)?.propertyId === propertyId);
   const byTenant = {};
   for (const l of ls) (byTenant[l.tenantId] = byTenant[l.tenantId] || []).push(l);
-  const out = ls.map((l) => ({ value: 'l:' + l.id, names: [leaseImportLabel(l), leaseImportLabel(l).replace(/ \(ended\)$/, ''), leaseLabel(l)] }));
+  const out = ls.map((l) => ({ value: 'l:' + l.id, names: [leaseImportLabel(l), leaseImportLabel(l).replace(/ \(ended\)$/, ''), leaseImportLabel(l) + ' (ended)', leaseLabel(l), leaseLabel(l).replace(/ \(ended\)$/, '')] }));
   // plain tenant name → the tenant's lease covering each row's date
   for (const [tid, list] of Object.entries(byTenant)) out.push({ value: list.length === 1 ? 'l:' + list[0].id : 't:' + tid, names: [tenantName(tid)] });
   return out;
