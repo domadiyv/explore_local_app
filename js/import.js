@@ -391,6 +391,10 @@ function buildImport() {
     // category & rent month
     const rawCat = cellText(impCell(r, 'category'));
     t.category = rawCat ? (cats.find((c) => normName(c) === normName(rawCat)) || rawCat) : (KINDS[t.kind].cats.length === 1 ? KINDS[t.kind].cats[0] : t.kind === 'income' && t.leaseId ? 'Rent' : '');
+    // "Income" + category "Security deposit" is a deposit received (held for the tenant), not rent income
+    const depKind = depositKindFor(t);
+    if (depKind && t.leaseId) { warnings.push(`Recorded as “${KINDS[depKind].label}” because the category is “${t.category}”, so it counts under Deposit held`); t.kind = depKind; }
+    else if (depKind) warnings.push(`The category says security deposit — choose the tenant / lease so it is tracked as a deposit (otherwise it is imported as ${KINDS[t.kind].short.toLowerCase()})`);
     if ((t.kind === 'income' || t.kind === 'deposit_apply') && t.leaseId && /rent/i.test(t.category)) {
       const rawP = impCell(r, 'period');
       t.period = parseImportMonth(rawP, IMP.order) || (t.date || '').slice(0, 7);

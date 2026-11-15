@@ -1862,6 +1862,14 @@ V.reports = (sub, q) => {
 };
 
 // ---------------------------------------------------------------- data check
+// An Income/Expense whose category says it is a security deposit (refund): the deposit kind it should be, else ''.
+function depositKindFor(t) {
+  const c = t.category || '';
+  if (!/\bdeposit\b/i.test(c)) return '';
+  if (t.kind === 'income' && !/refund|return/i.test(c)) return 'deposit_in';
+  if (t.kind === 'expense' && /refund|return/i.test(c)) return 'deposit_out';
+  return '';
+}
 // Partner ids an entry refers to (who paid/received, who is split, who handled it).
 function txnPartnerRefs(t) {
   const ids = [t.partnerId, t.toPartnerId, t.via?.t === 'p' ? t.via.id : '', t.via?.t === 'a' ? t.handledBy : '', ...(t.split || []).map((x) => x.partnerId)];
@@ -1885,6 +1893,14 @@ function dataIssues() {
   for (const grp of dupGroups('tenants')) {
     out.push({ kind: 'dup', title: `Tenant “${grp[0].name}” exists ${grp.length} times`,
       copies: grp.map((x) => ({ id: x.id, store: 'tenants', mergeable: true, text: `${x.name} — ${tenantWhere(x.id) || 'no lease'}${x.phone ? ' · ' + x.phone : ''}` })) });
+  }
+  const depo = S.txns.filter(depositKindFor).sort((a, b) => b.date.localeCompare(a.date));
+  if (depo.length) {
+    const fixable = depo.filter((t) => t.leaseId).length;
+    out.push({ kind: 'deposit', title: `${plural(depo.length, 'entry is', 'entries are')} recorded as ${depo.every((t) => t.kind === 'income') ? 'Income' : 'Income/Expense'} but the category says security deposit`,
+      detail: 'So they count as rent income / an expense instead of a deposit you hold for the tenant (Deposit held shows too little). ' +
+        (fixable === depo.length ? 'Convert them to deposit entries:' : `${fixable} can be converted now; open the others and choose the tenant's lease first.`),
+      btns: fixable ? `<button class="btn sm" data-act="convertDeposits">Convert ${plural(fixable, 'entry', 'entries')}</button>` : '', list: depo });
   }
   for (const p of S.properties) {
     const dup = duplicateOwners(p.owners || []);
@@ -2265,6 +2281,12 @@ const ACTIONS = {
   newPartner: () => partnerForm(),
   editPartner: (d) => partnerForm(d.id),
   merge: (d) => mergeForm(d.store, d.id),
+  convertDeposits: async () => {
+    const list = S.txns.filter((t) => depositKindFor(t) && t.leaseId);
+    if (!confirm(`Change ${plural(list.length, 'entry', 'entries')} into security deposit entries?\n\nThey stop counting as income/expense and show under Deposit held on the lease instead. Amounts, dates and accounts stay the same.`)) return;
+    for (const t of list) { t.kind = depositKindFor(t); delete t.period; await save('txns', t); }
+    toast('Converted'); render();
+  },
   fixOwners: async (d) => {
     const p = byId('properties', d.id);
     const out = [];
