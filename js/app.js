@@ -1305,12 +1305,12 @@ function txnForm(id, preset = {}) {
 }
 
 // ---------------------------------------------------------------- view helpers
-function txnRow(t) {
+function txnRow(t, extra) {
   const s = txnSigned(t);
   const nFiles = S.files.filter((f) => f.linkType === 'txn' && f.linkId === t.id).length;
   const cls = s > 0 ? 'pos' : s < 0 ? 'neg' : 'muted';
   return `<div class="row nav" data-act="txn" data-id="${t.id}">
-    <div class="grow"><div class="t">${esc(txnTitle(t))}${nFiles ? ` <span class="chip">📎${nFiles}</span>` : ''}</div><div class="s">${esc(fmtDate(t.date))} · ${esc(txnSubtitle(t))}</div>${t.description ? `<div class="d">${esc(t.description)}</div>` : ''}</div>
+    <div class="grow"><div class="t">${esc(txnTitle(t))}${nFiles ? ` <span class="chip">📎${nFiles}</span>` : ''}</div><div class="s">${esc(fmtDate(t.date))} · ${esc(txnSubtitle(t))}</div>${t.description ? `<div class="d">${esc(t.description)}</div>` : ''}${extra ? `<div class="role-amt">${extra}</div>` : ''}</div>
     <div class="r amt ${cls}">${s ? money(s, true) : money(t.amount)}</div></div>`;
 }
 function txnList(txns, limit) {
@@ -1641,8 +1641,29 @@ V.tenant = (id) => {
 };
 
 // ---------------------------------------------------------------- ledger
+// The lines of the Partners › Breakdown table: which entries make up each number, and how much of each
+// entry counts for that partner (same rules as partnerPositions).
+const isIn = (t) => t.kind === 'income' || t.kind === 'deposit_in';
+const isOut = (t) => t.kind === 'expense' || t.kind === 'deposit_out';
+const viaP = (t, pid) => t.via?.t === 'p' && t.via.id === pid;
+const PARTNER_ROLES = {
+  paidPersonally: { label: 'Paid expenses personally', amt: (t, pid) => (isOut(t) && viaP(t, pid) ? t.amount : 0) },
+  receivedPersonally: { label: 'Received income personally', amt: (t, pid) => (isIn(t) && viaP(t, pid) ? t.amount : 0) },
+  contributed: { label: 'Put into common account', amt: (t, pid) => (t.kind === 'contribution' && t.partnerId === pid ? t.amount : 0) },
+  withdrawn: { label: 'Took from common account', amt: (t, pid) => (t.kind === 'withdrawal' && t.partnerId === pid ? t.amount : 0) },
+  settledPaid: { label: 'Settlements paid', amt: (t, pid) => (t.kind === 'settlement' && t.partnerId === pid ? t.amount : 0) },
+  settledReceived: { label: 'Settlements received', amt: (t, pid) => (t.kind === 'settlement' && t.toPartnerId === pid ? t.amount : 0) },
+  shareIncome: { label: 'Share of income & deposits in', amt: (t, pid) => (isIn(t) ? r2(t.amount * (sharesFor(t)[pid] || 0)) : 0) },
+  shareExpense: { label: 'Share of expenses & refunds', amt: (t, pid) => (isOut(t) ? r2(t.amount * (sharesFor(t)[pid] || 0)) : 0) },
+  net: { label: 'Effect on net position (+ owed / − owes)', signed: true, amt: (t, pid) => {
+    const { cap, shares } = effects(t);
+    const total = Object.values(cap).reduce((x, y) => x + y, 0);
+    return r2((cap[pid] || 0) - (shares[pid] || 0) * total);
+  } },
+};
 function ledgerFilter(q) {
   const p = q.get('p') || '', k = q.get('k') || '', v = q.get('v') || '', per = q.get('per') || 'all', s = (q.get('q') || '').toLowerCase(), imp = q.get('imp') || '';
+  const role = PARTNER_ROLES[q.get('role')] ? q.get('role') : '', who = q.get('who') || '';
   let from = '', to = '';
   const d = today(), y = d.slice(0, 4), m = d.slice(0, 7);
   if (per === 'm') { from = m + '-01'; to = m + '-31'; }
@@ -1654,6 +1675,7 @@ function ledgerFilter(q) {
   const list = S.txns.filter((t) => {
     if (p && t.propertyId !== p) return false;
     if (imp && t.importId !== imp) return false;
+    if (role && who && Math.abs(PARTNER_ROLES[role].amt(t, who)) < 0.005) return false;
     if (k === 'in' && KINDS[t.kind].dir !== 'in') return false;
     if (k === 'out' && KINDS[t.kind].dir !== 'out') return false;
     if (k === 'partner' && !['contribution', 'withdrawal', 'settlement'].includes(t.kind)) return false;
@@ -1668,7 +1690,7 @@ function ledgerFilter(q) {
     if (s && !(`${txnTitle(t)} ${txnSubtitle(t)} ${t.description || ''} ${t.amount}`.toLowerCase().includes(s))) return false;
     return true;
   });
-  return { list, p, k, v, per, from, to, s };
+  return { list, p, k, v, per, from, to, s, role, who };
 }
 V.ledger = (sub, q) => {
   const f = ledgerFilter(q);
@@ -1676,6 +1698,11 @@ V.ledger = (sub, q) => {
   const out = sum(f.list.filter((t) => KINDS[t.kind].dir === 'out'), (t) => t.amount);
   const groups = {};
   [...f.list].sort((a, b) => (b.date + (b.createdAt || '')).localeCompare(a.date + (a.createdAt || ''))).forEach((t) => (groups[t.date] = groups[t.date] || []).push(t));
+  const R = f.role && f.who ? PARTNER_ROLES[f.role] : null;
+  const roleAmt = (t) => R.amt(t, f.who);
+  const roleTotal = R ? sum(f.list, roleAmt) : 0;
+  const clearRole = (() => { const nq = new URLSearchParams(q); nq.delete('role'); nq.delete('who'); return '#/ledger?' + nq; })();
+  const row = (t) => (R ? txnRow(t, `${esc(partnerName(f.who))}: ${R.signed ? money(roleAmt(t), true) : money(roleAmt(t))}`) : txnRow(t));
   return {
     title: 'Ledger',
     actions: [{ label: 'Export', act: 'exportLedger' }],
@@ -1687,12 +1714,13 @@ V.ledger = (sub, q) => {
         ${f.per === 'custom' ? `<div class="date-range"><label>From<input type="date" data-date="from" value="${esc(f.from)}"></label><label>To<input type="date" data-date="to" value="${esc(f.to)}"></label><button type="button" class="btn sm" id="applyDates">Apply</button></div>` : ''}
         <input type="search" data-q="q" value="${esc(f.s)}" placeholder="Search">
       </div>
+      ${R ? `<div class="banner role-banner"><div class="grow"><div class="small">${esc(partnerName(f.who))} · ${esc(R.label)}${f.p ? ' · ' + esc(propName(f.p)) : ''}</div><div style="font-weight:700;font-size:18px">${R.signed ? money(roleTotal, true) : money(roleTotal)}</div><div class="small">${plural(f.list.length, 'entry', 'entries')} · the amount under each entry is ${esc(partnerName(f.who))}'s part</div></div><a class="btn sm sec" href="${clearRole}">Clear</a></div>` : ''}
       <div class="stats" style="grid-template-columns:1fr 1fr 1fr">
         <div class="stat"><div class="k">In</div><div class="v pos" style="font-size:16px">${money(inc)}</div></div>
         <div class="stat"><div class="k">Out</div><div class="v neg" style="font-size:16px">${money(out)}</div></div>
         <div class="stat"><div class="k">Net</div><div class="v" style="font-size:16px">${money(inc - out)}</div></div>
       </div>
-      ${f.list.length ? Object.entries(groups).map(([d, ts]) => `<div class="date-head">${esc(fmtDate(d))}</div><div class="list">${ts.map(txnRow).join('')}</div>`).join('') : '<div class="empty">No transactions match</div>'}`,
+      ${f.list.length ? Object.entries(groups).map(([d, ts]) => `<div class="date-head">${esc(fmtDate(d))}</div><div class="list">${ts.map(row).join('')}</div>`).join('') : '<div class="empty">No transactions match</div>'}`,
     bind(main) {
       // Date pickers: iOS fires "change" on every turn of the wheel, so only apply when the picker is done
       // (focus leaves both date fields) or when Apply is tapped — never re-render while one is open.
@@ -1729,6 +1757,7 @@ V.partners = (sub, q) => {
   const tx = p ? S.txns.filter((t) => t.propertyId === p) : S.txns;
   const { pos, br } = partnerPositions(tx);
   const plan = settlePlan(pos);
+  const roleHref = (key, id) => `#/ledger?role=${key}&who=${id}${p ? '&p=' + p : ''}`;
   const owners = ownerIds(p);
   const ids = S.partners.map((x) => x.id).filter((id) => (p ? owners.includes(id) || Math.abs(pos[id] || 0) > 0.005 : pos[id] !== undefined || br[id]));
   const owns = (pid) => S.properties.filter((x) => x.owners?.some((o) => o.partnerId === pid)).map((x) => `${x.name} ${sum(x.owners.filter((o) => o.partnerId === pid), (o) => num(o.pct))}%`);
@@ -1748,9 +1777,9 @@ V.partners = (sub, q) => {
       ${plan.length ? `<h2>Suggested settlement</h2><div class="list">${plan.map((x) => `<div class="row"><div class="grow">${esc(partnerName(x.from))} → ${esc(partnerName(x.to))}</div><div class="amt">${money(x.amount)}</div><button class="btn sm" data-act="newTxn" data-kind="settlement" data-partner-id="${x.from}" data-to-partner-id="${x.to}" data-amount="${x.amount}" data-property-id="${p}">Record</button></div>`).join('')}</div>` : ''}
       <div class="hint" style="margin:8px 16px">Balances compare what each partner actually paid, received, put in or took out against their ownership share. “Is owed” means the others should pay this partner. Record a settlement (or a contribution/withdrawal) to square up.</div>
       ${ids.length ? `<h2>Breakdown</h2><div class="card scroll-x"><table class="t"><thead><tr><th></th>${ids.map((id) => `<th class="n">${esc(partnerName(id))}</th>`).join('')}</tr></thead><tbody>
-        ${rows.map(([label, key]) => `<tr><td>${label}</td>${ids.map((id) => `<td class="n">${money(br[id]?.[key] || 0)}</td>`).join('')}</tr>`).join('')}
-        <tr class="tot"><td>Net position</td>${ids.map((id) => `<td class="n ${pos[id] > 0.005 ? 'pos' : pos[id] < -0.005 ? 'neg' : ''}">${money(pos[id] || 0, true)}</td>`).join('')}</tr>
-      </tbody></table></div>` : ''}
+        ${rows.map(([label, key]) => `<tr><td>${label}</td>${ids.map((id) => `<td class="n">${br[id]?.[key] ? `<a href="${roleHref(key, id)}">${money(br[id][key])}</a>` : money(0)}</td>`).join('')}</tr>`).join('')}
+        <tr class="tot"><td>Net position</td>${ids.map((id) => `<td class="n ${pos[id] > 0.005 ? 'pos' : pos[id] < -0.005 ? 'neg' : ''}"><a href="${roleHref('net', id)}" style="color:inherit">${money(pos[id] || 0, true)}</a></td>`).join('')}</tr>
+      </tbody></table></div><div class="hint" style="margin:6px 16px">Tap any amount to see the entries behind it. Tap a net position to see how much each entry added to or took from it.</div>` : ''}
       <h2>${p ? 'Owners of ' + esc(propName(p)) : 'All partners'}</h2>
       <div class="list">${shown.map((x) => `<div class="row nav" data-act="editPartner" data-id="${x.id}"><div class="grow"><div class="t">${esc(x.name)}${x.isSelf ? ' <span class="chip">me</span>' : ''}${S.partners.some((y) => y.id !== x.id && normName(y.name) === normName(x.name)) ? ' <span class="chip warn-owner">duplicate name</span>' : ''}</div><div class="s">${esc(owns(x.id).join(' · ') || 'Owns no property')}${x.phone || x.email ? ' · ' + esc([x.phone, x.email].filter(Boolean).join(' · ')) : ''}</div></div></div>`).join('') || '<div class="empty">No owners set</div>'}</div>
       <div class="btns"><a class="btn sec" href="#/ledger?k=partner${p ? '&p=' + p : ''}">Partner transactions</a></div>`,

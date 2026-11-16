@@ -206,3 +206,6 @@ table.t tr.tot td { font-weight: 700; }
 .imp-row.skip { opacity: .6; }
 .v.warn, .stat .warn { color: var(--warn); }
 details > summary { cursor: pointer; }
+.row .role-amt { font-size: 13px; font-weight: 600; margin-top: 2px; color: var(--accent); }
+.role-banner { color: var(--text); background: var(--accent-soft); }
+table.t td.n { white-space: nowrap; }
