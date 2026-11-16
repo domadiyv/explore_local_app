@@ -517,6 +517,47 @@ function section(name) { console.log('\n' + name); }
     eq(await positions('Solo'), {}, 'solo owner owes nobody');
     await ev(async (d) => { await DB.replaceAll({ ...JSON.parse(d), settings: [{ id: 'main', ...S.settings }] }); await loadAll(); }, saved);
 
+    section('Partners breakdown: every number opens the entries behind it');
+    const mismatches = await ev(() => {
+      const bad = [];
+      for (const p of ['', ...S.properties.map((x) => x.id)]) {
+        const { pos, br } = partnerPositions(p ? S.txns.filter((t) => t.propertyId === p) : S.txns);
+        for (const pid of Object.keys(br)) for (const key of Object.keys(PARTNER_ROLES)) {
+          const want = key === 'net' ? pos[pid] || 0 : br[pid][key] || 0;
+          const f = ledgerFilter(new URLSearchParams(`role=${key}&who=${pid}${p ? '&p=' + p : ''}`));
+          const got = sum(f.list, (t) => PARTNER_ROLES[key].amt(t, pid));
+          if (Math.abs(got - want) > 0.02) bad.push(`${p || 'all'} ${partnerName(pid)} ${key}: ${got} vs ${want}`);
+        }
+      }
+      return bad;
+    });
+    eq(mismatches, [], 'for every property, partner and line, the listed entries add up to the number shown');
+    await go('#/partners?p=' + maple);
+    const firstLink = await page.$('#main table a[href*="role=net"]');
+    ok(!!firstLink, 'net position is tappable');
+    const cellText = (await firstLink.textContent()).trim();
+    await firstLink.click(); await page.waitForTimeout(200);
+    const banner = await page.textContent('.role-banner');
+    ok(banner.includes('Effect on net position') && banner.includes(cellText), `ledger opens with the same total (${cellText})`);
+    ok((await page.$$('#main .role-amt')).length > 0, 'each entry shows that partner’s part');
+    await page.click('.role-banner a'); await page.waitForTimeout(150);
+    ok(!(await page.$('.role-banner')), 'Clear removes the partner filter');
+
+    section('Lease past its end date shows as Expired, not Upcoming');
+    await ev(async () => { await save('leases', { id: 'l_exp', unitId: S.units[0].id, tenantId: S.tenants[0].id, startDate: '2025-08-01', endDate: '2025-12-31', status: 'active', rent: 2610, dueDay: 1 }); });
+    await go('#/lease/l_exp');
+    const lp = await page.textContent('#main');
+    ok(lp.includes('Expired') && !lp.includes('Upcoming'), 'lease page chip says Expired');
+    ok(lp.includes('This lease ended on') && !!(await page.$('[data-act=endLease]')), 'explains it and still offers End lease');
+    eq(await ev(() => leaseStats(byId('leases', 'l_exp')).months.length), 5, 'rent charged only Aug–Dec 2025');
+    await go('#/rentals/leases?s=ended');
+    ok((await page.$$('#main a[href="#/lease/l_exp"]')).length === 1, 'listed under Leases › Ended');
+    await go('#/rentals/leases?s=active');
+    ok((await page.$$('#main a[href="#/lease/l_exp"]')).length === 0, 'not listed under Leases › Active');
+    await go('#/unit/' + (await ev(() => S.units[0].id)));
+    ok((await page.textContent('#main')).includes('Expired'), 'unit page lists it as Expired');
+    await ev(async () => { await remove('leases', 'l_exp'); });
+
     section('Pages render without errors');
     for (const hsh of ['#/home', '#/properties', '#/property/' + maple, '#/unit/' + (await ev(() => S.units[0].id)), '#/rentals', '#/rentals/leases', '#/rentals/tenants', '#/lease/' + (await ev(() => S.leases[0].id)), '#/tenant/' + (await ev(() => S.tenants[0].id)), '#/ledger', '#/partners', '#/accounts', '#/documents', '#/reports', '#/more', '#/data', '#/settings', '#/help', '#/check']) {
       await go(hsh);

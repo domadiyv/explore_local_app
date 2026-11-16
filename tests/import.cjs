@@ -216,6 +216,41 @@ const unzipText = (file, member) => execFileSync('unzip', ['-p', file, member]).
     eq(sm.ready, 0, 'importing the same file twice: nothing new to import (' + JSON.stringify(sm) + ')');
     ok(await page.$eval('#impGo', (b) => b.disabled), 'Import button disabled when nothing is new');
 
+    section('“Income” rows with category “Security deposit” become deposits');
+    const fd = await writeXlsx(path.join(TMP, 'deposits.xlsx'), ['Date', 'Type', 'Amount', 'Tenant / lease', 'Property', 'Category', 'Description'], [
+      ['2025-07-14', 'Income', 500, 'Mary Jones · Oak › Main', '', 'Security deposit', 'dep part 1'],
+      ['2025-07-21', 'Income', 1500, 'Mary Jones · Oak › Main', '', 'Security deposit', 'dep part 2'],
+      ['2025-07-22', 'Income', 99, '', 'Oak', 'Security deposit', 'dep no lease'],
+    ]);
+    const depBefore = await ev(() => leaseStats(byId('leases', 'l_mary')).depHeld);
+    await chooseFile(fd);
+    eq(await summary(), { ready: 3, bad: 0, dup: 0 }, 'all 3 rows ready');
+    const dtext = await page.textContent('#main');
+    ok(dtext.includes('Recorded as “Security deposit received”'), 'preview says it will record them as deposits');
+    ok(dtext.includes('choose the tenant / lease so it is tracked as a deposit'), 'row without a lease gets a warning');
+    await doImport();
+    eq(await ev(() => S.txns.filter((t) => /^dep /.test(t.description)).map((t) => [t.description, t.kind]).sort()), [['dep no lease', 'income'], ['dep part 1', 'deposit_in'], ['dep part 2', 'deposit_in']], 'rows with a lease imported as Deposit received');
+    eq(await ev(() => leaseStats(byId('leases', 'l_mary')).depHeld), depBefore + 2000, 'Deposit held on the lease goes up by 2,000');
+    await ev(async () => { const t = S.txns.find((x) => x.description === 'dep no lease'); await remove('txns', t.id); });
+
+    section('Data check converts deposits already recorded as Income');
+    await ev(async () => {
+      await save('txns', { id: 'oldDep1', kind: 'income', date: '2025-07-28', amount: 1825, category: 'Security deposit', propertyId: 'oak', unitId: 'om', leaseId: 'l_mary', via: { t: 'a', id: 'macc' } });
+      await save('txns', { id: 'oldDep2', kind: 'income', date: '2025-07-29', amount: 10, category: 'Security deposit', propertyId: 'oak', via: { t: 'a', id: 'macc' } });
+    });
+    const held = await ev(() => leaseStats(byId('leases', 'l_mary')).depHeld);
+    await go('#/check');
+    const ctext = await page.textContent('#main');
+    ok(ctext.includes('2 entries are recorded as Income but the category says security deposit'), 'data check finds them');
+    ok(ctext.includes('1 can be converted now'), 'explains the one without a lease needs editing');
+    answers.push(true);
+    await page.click('[data-act=convertDeposits]'); await page.waitForTimeout(300);
+    eq(await ev(() => [byId('txns', 'oldDep1').kind, byId('txns', 'oldDep2').kind]), ['deposit_in', 'income'], 'the entry with a lease is converted; the other is left for you');
+    eq(await ev(() => leaseStats(byId('leases', 'l_mary')).depHeld), held + 1825, 'Deposit held includes the converted 1,825');
+    await ev(async () => { await remove('txns', 'oldDep2'); render(); });
+    await go('#/check');
+    const after = await page.textContent('#main'); ok(!after.includes('category says security deposit'), 'nothing left to convert: ' + after.slice(0, 400));
+
     section('Bank statement CSV (other column names, day/month dates, debit/credit)');
     const csv = 'Posted Date,Details,Debit,Credit,Balance\n' +
       '31/01/2025,"RENT JOHN SMITH, JAN",,"1,500.00",9000\n' +

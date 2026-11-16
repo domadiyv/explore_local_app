@@ -126,7 +126,7 @@ function viaLabel(v) {
 }
 function leaseLabel(l) {
   if (!l) return '';
-  return `${tenantName(l.tenantId) || 'Tenant'} · ${unitName(l.unitId)}${l.status === 'ended' ? ' (ended)' : ''}`;
+  return `${tenantName(l.tenantId) || 'Tenant'} · ${unitName(l.unitId)}${leaseIsCurrent(l) ? '' : ' (ended)'}`;
 }
 function txnTitle(t) {
   const k = KINDS[t.kind];
@@ -322,6 +322,17 @@ function leaseStats(l) {
 }
 function paidForPeriod(l, ym) {
   return sum(S.txns.filter((t) => t.leaseId === l.id && isRentPayment(t) && (t.period || t.date.slice(0, 7)) === ym), (t) => t.amount);
+}
+// 'ended' (closed with End lease), 'expired' (end date passed, not closed yet), 'upcoming' or 'active'.
+function leaseState(l, date = today()) {
+  if (l.status === 'ended') return 'ended';
+  if (l.endDate && l.endDate < date) return 'expired';
+  if (l.startDate > date) return 'upcoming';
+  return 'active';
+}
+const leaseIsCurrent = (l) => ['active', 'upcoming'].includes(leaseState(l));
+function leaseChip(l) {
+  return { ended: '<span class="chip">Ended</span>', expired: '<span class="chip">Expired</span>', upcoming: '<span class="chip warn">Upcoming</span>', active: '<span class="chip ok">Active</span>' }[leaseState(l)];
 }
 function leaseIsActiveOn(l, date) {
   if (l.status === 'ended') return false;
@@ -823,8 +834,8 @@ function tenantForm(id, onSaved) {
 
 // Where a tenant rents: "Unit · Property" of their current (or latest) lease.
 function tenantWhere(tenantId) {
-  const ls = S.leases.filter((l) => l.tenantId === tenantId).sort((a, b) => (a.status === 'ended') - (b.status === 'ended') || b.startDate.localeCompare(a.startDate));
-  return ls[0] ? `${unitName(ls[0].unitId)} · ${propName(byId('units', ls[0].unitId)?.propertyId)}${ls[0].status === 'ended' ? ' (past)' : ''}` : '';
+  const ls = S.leases.filter((l) => l.tenantId === tenantId).sort((a, b) => leaseIsCurrent(b) - leaseIsCurrent(a) || b.startDate.localeCompare(a.startDate));
+  return ls[0] ? `${unitName(ls[0].unitId)} · ${propName(byId('units', ls[0].unitId)?.propertyId)}${leaseIsCurrent(ls[0]) ? '' : ' (past)'}` : '';
 }
 const tenantPropertyIds = (tenantId) => new Set(S.leases.filter((l) => l.tenantId === tenantId).map((l) => byId('units', l.unitId)?.propertyId).filter(Boolean));
 
@@ -1294,12 +1305,12 @@ function txnForm(id, preset = {}) {
 }
 
 // ---------------------------------------------------------------- view helpers
-function txnRow(t) {
+function txnRow(t, extra) {
   const s = txnSigned(t);
   const nFiles = S.files.filter((f) => f.linkType === 'txn' && f.linkId === t.id).length;
   const cls = s > 0 ? 'pos' : s < 0 ? 'neg' : 'muted';
   return `<div class="row nav" data-act="txn" data-id="${t.id}">
-    <div class="grow"><div class="t">${esc(txnTitle(t))}${nFiles ? ` <span class="chip">📎${nFiles}</span>` : ''}</div><div class="s">${esc(fmtDate(t.date))} · ${esc(txnSubtitle(t))}</div>${t.description ? `<div class="d">${esc(t.description)}</div>` : ''}</div>
+    <div class="grow"><div class="t">${esc(txnTitle(t))}${nFiles ? ` <span class="chip">📎${nFiles}</span>` : ''}</div><div class="s">${esc(fmtDate(t.date))} · ${esc(txnSubtitle(t))}</div>${t.description ? `<div class="d">${esc(t.description)}</div>` : ''}${extra ? `<div class="role-amt">${extra}</div>` : ''}</div>
     <div class="r amt ${cls}">${s ? money(s, true) : money(t.amount)}</div></div>`;
 }
 function txnList(txns, limit) {
@@ -1491,7 +1502,7 @@ V.unit = (id) => {
         ${u.notes ? `<div class="small" style="white-space:pre-wrap;margin-top:6px">${esc(u.notes)}</div>` : ''}</div>
       <div class="btns">${cur ? `<a class="btn" href="#/lease/${cur.id}">Current lease</a>` : ''}<button class="btn ${cur ? 'sec' : ''}" data-act="newLease" data-unit-id="${id}">+ New lease</button><button class="btn sec" data-act="newTxn" data-kind="expense" data-property-id="${u.propertyId}" data-unit-id="${id}">+ Expense</button></div>
       <h2>Leases</h2>
-      ${leases.length ? `<div class="list">${leases.map((l) => `<a class="row" href="#/lease/${l.id}"><div class="grow"><div class="t">${esc(tenantName(l.tenantId))} ${l.status === 'ended' ? '<span class="chip">Ended</span>' : leaseIsActiveOn(l, today()) ? '<span class="chip ok">Active</span>' : '<span class="chip warn">Upcoming</span>'}</div><div class="s">${fmtDate(l.startDate)} – ${l.endDate ? fmtDate(l.endDate) : 'open'} · ${money(l.rent)}/mo</div></div></a>`).join('')}</div>` : '<div class="list"><div class="empty">No leases yet</div></div>'}
+      ${leases.length ? `<div class="list">${leases.map((l) => `<a class="row" href="#/lease/${l.id}"><div class="grow"><div class="t">${esc(tenantName(l.tenantId))} ${leaseChip(l)}</div><div class="s">${fmtDate(l.startDate)} – ${l.endDate ? fmtDate(l.endDate) : 'open'} · ${money(l.rent)}/mo</div></div></a>`).join('')}</div>` : '<div class="list"><div class="empty">No leases yet</div></div>'}
       <h2>Transactions</h2>
       ${txnList(S.txns.filter((t) => t.unitId === id), 20)}`,
   };
@@ -1508,7 +1519,7 @@ V.rentals = (sub, q) => {
   const inProp = (l) => !pf || leaseProp(l) === pf;
   if (tab === 'leases') {
     const show = q.get('s') || 'active';
-    const list = S.leases.filter((l) => inProp(l) && (show === 'ended' ? l.status === 'ended' : l.status !== 'ended')).sort((a, b) => propName(leaseProp(a)).localeCompare(propName(leaseProp(b))) || leaseLabel(a).localeCompare(leaseLabel(b)));
+    const list = S.leases.filter((l) => inProp(l) && (show === 'ended' ? !leaseIsCurrent(l) : leaseIsCurrent(l))).sort((a, b) => propName(leaseProp(a)).localeCompare(propName(leaseProp(b))) || leaseLabel(a).localeCompare(leaseLabel(b)));
     return {
       title: 'Rentals', actions: [{ label: '+ Lease', act: 'newLease' }], bind,
       html: `${seg}<div class="seg">${[['active', 'Active'], ['ended', 'Ended']].map(([k, l]) => `<button data-act="go" data-href="#/rentals/leases${keep('s=' + k)}" class="${show === k ? 'on' : ''}">${l}</button>`).join('')}</div>
@@ -1522,7 +1533,7 @@ V.rentals = (sub, q) => {
   if (tab === 'tenants') {
     const tenantRow = (t, propId) => {
       const ls = S.leases.filter((l) => l.tenantId === t.id && (!propId || leaseProp(l) === propId));
-      const act = ls.find((l) => l.status !== 'ended');
+      const act = ls.find(leaseIsCurrent);
       return `<a class="row" href="#/tenant/${t.id}"><div class="grow"><div class="t">${esc(t.name)}</div><div class="s">${esc([t.phone || t.email, act ? unitName(act.unitId) : ls.length ? 'past tenant' : ''].filter(Boolean).join(' · '))}</div></div></a>`;
     };
     const sorted = [...S.tenants].sort((a, b) => a.name.localeCompare(b.name));
@@ -1572,11 +1583,12 @@ V.lease = (id) => {
     title: tenantName(l.tenantId) || 'Lease', back: '#/rentals/leases',
     actions: [{ label: 'Edit', act: 'editLease', id }],
     html: `<div class="card pad" style="margin-top:12px">
-        <div class="t"><a href="#/tenant/${l.tenantId}">${esc(tenantName(l.tenantId))}</a> ${l.status === 'ended' ? '<span class="chip">Ended</span>' : leaseIsActiveOn(l, today()) ? '<span class="chip ok">Active</span>' : '<span class="chip warn">Upcoming</span>'}</div>
+        <div class="t"><a href="#/tenant/${l.tenantId}">${esc(tenantName(l.tenantId))}</a> ${leaseChip(l)}</div>
         <div class="small"><a href="#/unit/${l.unitId}">${esc(u?.name || '')}</a> · <a href="#/property/${u?.propertyId}">${esc(propName(u?.propertyId))}</a></div>
         <div class="small muted">${fmtDate(l.startDate)} – ${l.endDate ? fmtDate(l.endDate) : 'open-ended'} · ${money(l.rent)}/month, due on day ${l.dueDay}</div>
         ${l.adjustment ? `<div class="small muted">Balance adjustment: ${money(l.adjustment)}</div>` : ''}
         ${l.notes ? `<div class="small" style="white-space:pre-wrap;margin-top:6px">${esc(l.notes)}</div>` : ''}
+        ${leaseState(l) === 'expired' ? `<div class="small warn" style="margin-top:6px">This lease ended on ${fmtDate(l.endDate)}, so no rent is charged after that. Tenant moved out? Tap <b>End lease</b> and settle the deposit. Still living there? Tap <b>Edit</b> and extend the end date.</div>` : ''}
       </div>
       <div class="stats">
         <div class="stat"><div class="k">Rent balance</div><div class="v ${st.balance > 0.005 ? 'neg' : 'pos'}">${st.balance < -0.005 ? money(-st.balance) + ' cr' : money(st.balance)}</div><div class="x">${money(st.rentPaid)} paid of ${money(st.rentDue)}</div></div>
@@ -1629,8 +1641,29 @@ V.tenant = (id) => {
 };
 
 // ---------------------------------------------------------------- ledger
+// The lines of the Partners › Breakdown table: which entries make up each number, and how much of each
+// entry counts for that partner (same rules as partnerPositions).
+const isIn = (t) => t.kind === 'income' || t.kind === 'deposit_in';
+const isOut = (t) => t.kind === 'expense' || t.kind === 'deposit_out';
+const viaP = (t, pid) => t.via?.t === 'p' && t.via.id === pid;
+const PARTNER_ROLES = {
+  paidPersonally: { label: 'Paid expenses personally', amt: (t, pid) => (isOut(t) && viaP(t, pid) ? t.amount : 0) },
+  receivedPersonally: { label: 'Received income personally', amt: (t, pid) => (isIn(t) && viaP(t, pid) ? t.amount : 0) },
+  contributed: { label: 'Put into common account', amt: (t, pid) => (t.kind === 'contribution' && t.partnerId === pid ? t.amount : 0) },
+  withdrawn: { label: 'Took from common account', amt: (t, pid) => (t.kind === 'withdrawal' && t.partnerId === pid ? t.amount : 0) },
+  settledPaid: { label: 'Settlements paid', amt: (t, pid) => (t.kind === 'settlement' && t.partnerId === pid ? t.amount : 0) },
+  settledReceived: { label: 'Settlements received', amt: (t, pid) => (t.kind === 'settlement' && t.toPartnerId === pid ? t.amount : 0) },
+  shareIncome: { label: 'Share of income & deposits in', amt: (t, pid) => (isIn(t) ? r2(t.amount * (sharesFor(t)[pid] || 0)) : 0) },
+  shareExpense: { label: 'Share of expenses & refunds', amt: (t, pid) => (isOut(t) ? r2(t.amount * (sharesFor(t)[pid] || 0)) : 0) },
+  net: { label: 'Effect on net position (+ owed / − owes)', signed: true, amt: (t, pid) => {
+    const { cap, shares } = effects(t);
+    const total = Object.values(cap).reduce((x, y) => x + y, 0);
+    return r2((cap[pid] || 0) - (shares[pid] || 0) * total);
+  } },
+};
 function ledgerFilter(q) {
   const p = q.get('p') || '', k = q.get('k') || '', v = q.get('v') || '', per = q.get('per') || 'all', s = (q.get('q') || '').toLowerCase(), imp = q.get('imp') || '';
+  const role = PARTNER_ROLES[q.get('role')] ? q.get('role') : '', who = q.get('who') || '';
   let from = '', to = '';
   const d = today(), y = d.slice(0, 4), m = d.slice(0, 7);
   if (per === 'm') { from = m + '-01'; to = m + '-31'; }
@@ -1642,6 +1675,7 @@ function ledgerFilter(q) {
   const list = S.txns.filter((t) => {
     if (p && t.propertyId !== p) return false;
     if (imp && t.importId !== imp) return false;
+    if (role && who && Math.abs(PARTNER_ROLES[role].amt(t, who)) < 0.005) return false;
     if (k === 'in' && KINDS[t.kind].dir !== 'in') return false;
     if (k === 'out' && KINDS[t.kind].dir !== 'out') return false;
     if (k === 'partner' && !['contribution', 'withdrawal', 'settlement'].includes(t.kind)) return false;
@@ -1656,7 +1690,7 @@ function ledgerFilter(q) {
     if (s && !(`${txnTitle(t)} ${txnSubtitle(t)} ${t.description || ''} ${t.amount}`.toLowerCase().includes(s))) return false;
     return true;
   });
-  return { list, p, k, v, per, from, to, s };
+  return { list, p, k, v, per, from, to, s, role, who };
 }
 V.ledger = (sub, q) => {
   const f = ledgerFilter(q);
@@ -1664,6 +1698,11 @@ V.ledger = (sub, q) => {
   const out = sum(f.list.filter((t) => KINDS[t.kind].dir === 'out'), (t) => t.amount);
   const groups = {};
   [...f.list].sort((a, b) => (b.date + (b.createdAt || '')).localeCompare(a.date + (a.createdAt || ''))).forEach((t) => (groups[t.date] = groups[t.date] || []).push(t));
+  const R = f.role && f.who ? PARTNER_ROLES[f.role] : null;
+  const roleAmt = (t) => R.amt(t, f.who);
+  const roleTotal = R ? sum(f.list, roleAmt) : 0;
+  const clearRole = (() => { const nq = new URLSearchParams(q); nq.delete('role'); nq.delete('who'); return '#/ledger?' + nq; })();
+  const row = (t) => (R ? txnRow(t, `${esc(partnerName(f.who))}: ${R.signed ? money(roleAmt(t), true) : money(roleAmt(t))}`) : txnRow(t));
   return {
     title: 'Ledger',
     actions: [{ label: 'Export', act: 'exportLedger' }],
@@ -1675,12 +1714,13 @@ V.ledger = (sub, q) => {
         ${f.per === 'custom' ? `<div class="date-range"><label>From<input type="date" data-date="from" value="${esc(f.from)}"></label><label>To<input type="date" data-date="to" value="${esc(f.to)}"></label><button type="button" class="btn sm" id="applyDates">Apply</button></div>` : ''}
         <input type="search" data-q="q" value="${esc(f.s)}" placeholder="Search">
       </div>
+      ${R ? `<div class="banner role-banner"><div class="grow"><div class="small">${esc(partnerName(f.who))} · ${esc(R.label)}${f.p ? ' · ' + esc(propName(f.p)) : ''}</div><div style="font-weight:700;font-size:18px">${R.signed ? money(roleTotal, true) : money(roleTotal)}</div><div class="small">${plural(f.list.length, 'entry', 'entries')} · the amount under each entry is ${esc(partnerName(f.who))}'s part</div></div><a class="btn sm sec" href="${clearRole}">Clear</a></div>` : ''}
       <div class="stats" style="grid-template-columns:1fr 1fr 1fr">
         <div class="stat"><div class="k">In</div><div class="v pos" style="font-size:16px">${money(inc)}</div></div>
         <div class="stat"><div class="k">Out</div><div class="v neg" style="font-size:16px">${money(out)}</div></div>
         <div class="stat"><div class="k">Net</div><div class="v" style="font-size:16px">${money(inc - out)}</div></div>
       </div>
-      ${f.list.length ? Object.entries(groups).map(([d, ts]) => `<div class="date-head">${esc(fmtDate(d))}</div><div class="list">${ts.map(txnRow).join('')}</div>`).join('') : '<div class="empty">No transactions match</div>'}`,
+      ${f.list.length ? Object.entries(groups).map(([d, ts]) => `<div class="date-head">${esc(fmtDate(d))}</div><div class="list">${ts.map(row).join('')}</div>`).join('') : '<div class="empty">No transactions match</div>'}`,
     bind(main) {
       // Date pickers: iOS fires "change" on every turn of the wheel, so only apply when the picker is done
       // (focus leaves both date fields) or when Apply is tapped — never re-render while one is open.
@@ -1717,6 +1757,7 @@ V.partners = (sub, q) => {
   const tx = p ? S.txns.filter((t) => t.propertyId === p) : S.txns;
   const { pos, br } = partnerPositions(tx);
   const plan = settlePlan(pos);
+  const roleHref = (key, id) => `#/ledger?role=${key}&who=${id}${p ? '&p=' + p : ''}`;
   const owners = ownerIds(p);
   const ids = S.partners.map((x) => x.id).filter((id) => (p ? owners.includes(id) || Math.abs(pos[id] || 0) > 0.005 : pos[id] !== undefined || br[id]));
   const owns = (pid) => S.properties.filter((x) => x.owners?.some((o) => o.partnerId === pid)).map((x) => `${x.name} ${sum(x.owners.filter((o) => o.partnerId === pid), (o) => num(o.pct))}%`);
@@ -1736,9 +1777,9 @@ V.partners = (sub, q) => {
       ${plan.length ? `<h2>Suggested settlement</h2><div class="list">${plan.map((x) => `<div class="row"><div class="grow">${esc(partnerName(x.from))} → ${esc(partnerName(x.to))}</div><div class="amt">${money(x.amount)}</div><button class="btn sm" data-act="newTxn" data-kind="settlement" data-partner-id="${x.from}" data-to-partner-id="${x.to}" data-amount="${x.amount}" data-property-id="${p}">Record</button></div>`).join('')}</div>` : ''}
       <div class="hint" style="margin:8px 16px">Balances compare what each partner actually paid, received, put in or took out against their ownership share. “Is owed” means the others should pay this partner. Record a settlement (or a contribution/withdrawal) to square up.</div>
       ${ids.length ? `<h2>Breakdown</h2><div class="card scroll-x"><table class="t"><thead><tr><th></th>${ids.map((id) => `<th class="n">${esc(partnerName(id))}</th>`).join('')}</tr></thead><tbody>
-        ${rows.map(([label, key]) => `<tr><td>${label}</td>${ids.map((id) => `<td class="n">${money(br[id]?.[key] || 0)}</td>`).join('')}</tr>`).join('')}
-        <tr class="tot"><td>Net position</td>${ids.map((id) => `<td class="n ${pos[id] > 0.005 ? 'pos' : pos[id] < -0.005 ? 'neg' : ''}">${money(pos[id] || 0, true)}</td>`).join('')}</tr>
-      </tbody></table></div>` : ''}
+        ${rows.map(([label, key]) => `<tr><td>${label}</td>${ids.map((id) => `<td class="n">${br[id]?.[key] ? `<a href="${roleHref(key, id)}">${money(br[id][key])}</a>` : money(0)}</td>`).join('')}</tr>`).join('')}
+        <tr class="tot"><td>Net position</td>${ids.map((id) => `<td class="n ${pos[id] > 0.005 ? 'pos' : pos[id] < -0.005 ? 'neg' : ''}"><a href="${roleHref('net', id)}" style="color:inherit">${money(pos[id] || 0, true)}</a></td>`).join('')}</tr>
+      </tbody></table></div><div class="hint" style="margin:6px 16px">Tap any amount to see the entries behind it. Tap a net position to see how much each entry added to or took from it.</div>` : ''}
       <h2>${p ? 'Owners of ' + esc(propName(p)) : 'All partners'}</h2>
       <div class="list">${shown.map((x) => `<div class="row nav" data-act="editPartner" data-id="${x.id}"><div class="grow"><div class="t">${esc(x.name)}${x.isSelf ? ' <span class="chip">me</span>' : ''}${S.partners.some((y) => y.id !== x.id && normName(y.name) === normName(x.name)) ? ' <span class="chip warn-owner">duplicate name</span>' : ''}</div><div class="s">${esc(owns(x.id).join(' · ') || 'Owns no property')}${x.phone || x.email ? ' · ' + esc([x.phone, x.email].filter(Boolean).join(' · ')) : ''}</div></div></div>`).join('') || '<div class="empty">No owners set</div>'}</div>
       <div class="btns"><a class="btn sec" href="#/ledger?k=partner${p ? '&p=' + p : ''}">Partner transactions</a></div>`,
@@ -1850,6 +1891,14 @@ V.reports = (sub, q) => {
 };
 
 // ---------------------------------------------------------------- data check
+// An Income/Expense whose category says it is a security deposit (refund): the deposit kind it should be, else ''.
+function depositKindFor(t) {
+  const c = t.category || '';
+  if (!/\bdeposit\b/i.test(c)) return '';
+  if (t.kind === 'income' && !/refund|return/i.test(c)) return 'deposit_in';
+  if (t.kind === 'expense' && /refund|return/i.test(c)) return 'deposit_out';
+  return '';
+}
 // Partner ids an entry refers to (who paid/received, who is split, who handled it).
 function txnPartnerRefs(t) {
   const ids = [t.partnerId, t.toPartnerId, t.via?.t === 'p' ? t.via.id : '', t.via?.t === 'a' ? t.handledBy : '', ...(t.split || []).map((x) => x.partnerId)];
@@ -1873,6 +1922,14 @@ function dataIssues() {
   for (const grp of dupGroups('tenants')) {
     out.push({ kind: 'dup', title: `Tenant “${grp[0].name}” exists ${grp.length} times`,
       copies: grp.map((x) => ({ id: x.id, store: 'tenants', mergeable: true, text: `${x.name} — ${tenantWhere(x.id) || 'no lease'}${x.phone ? ' · ' + x.phone : ''}` })) });
+  }
+  const depo = S.txns.filter(depositKindFor).sort((a, b) => b.date.localeCompare(a.date));
+  if (depo.length) {
+    const fixable = depo.filter((t) => t.leaseId).length;
+    out.push({ kind: 'deposit', title: `${plural(depo.length, 'entry is', 'entries are')} recorded as ${depo.every((t) => t.kind === 'income') ? 'Income' : 'Income/Expense'} but the category says security deposit`,
+      detail: 'So they count as rent income / an expense instead of a deposit you hold for the tenant (Deposit held shows too little). ' +
+        (fixable === depo.length ? 'Convert them to deposit entries:' : `${fixable} can be converted now; open the others and choose the tenant's lease first.`),
+      btns: fixable ? `<button class="btn sm" data-act="convertDeposits">Convert ${plural(fixable, 'entry', 'entries')}</button>` : '', list: depo });
   }
   for (const p of S.properties) {
     const dup = duplicateOwners(p.owners || []);
@@ -2086,7 +2143,7 @@ function buildWorkbookSheets() {
   sheets.push({
     name: 'Leases',
     columns: [{ header: 'Tenant' }, { header: 'Property' }, { header: 'Unit' }, { header: 'Start', type: 'date' }, { header: 'End', type: 'date' }, { header: 'Status' }, { header: 'Monthly rent', type: 'money' }, { header: 'Due day', type: 'number' }, { header: 'Rent charged to date', type: 'money' }, { header: 'Rent paid', type: 'money' }, { header: 'Rent balance', type: 'money' }, { header: 'Deposit agreed', type: 'money' }, { header: 'Deposit received', type: 'money' }, { header: 'Deposit kept', type: 'money' }, { header: 'Deposit refunded', type: 'money' }, { header: 'Deposit held', type: 'money' }, { header: 'Notes' }],
-    rows: S.leases.map((l) => { const st = leaseStats(l); const u = byId('units', l.unitId); return [tenantName(l.tenantId), propName(u?.propertyId), u?.name, l.startDate, l.endDate, l.status === 'ended' ? 'Ended' : leaseIsActiveOn(l, today()) ? 'Active' : 'Upcoming', l.rent, l.dueDay, st.rentDue, st.rentPaid, st.balance, l.deposit, st.depIn, st.depApplied, st.depOut, st.depHeld, l.notes]; }),
+    rows: S.leases.map((l) => { const st = leaseStats(l); const u = byId('units', l.unitId); return [tenantName(l.tenantId), propName(u?.propertyId), u?.name, l.startDate, l.endDate, { ended: 'Ended', expired: 'Expired', upcoming: 'Upcoming', active: 'Active' }[leaseState(l)], l.rent, l.dueDay, st.rentDue, st.rentPaid, st.balance, l.deposit, st.depIn, st.depApplied, st.depOut, st.depHeld, l.notes]; }),
   });
   sheets.push(ledgerSheet(S.txns));
   // partner balances
@@ -2253,6 +2310,12 @@ const ACTIONS = {
   newPartner: () => partnerForm(),
   editPartner: (d) => partnerForm(d.id),
   merge: (d) => mergeForm(d.store, d.id),
+  convertDeposits: async () => {
+    const list = S.txns.filter((t) => depositKindFor(t) && t.leaseId);
+    if (!confirm(`Change ${plural(list.length, 'entry', 'entries')} into security deposit entries?\n\nThey stop counting as income/expense and show under Deposit held on the lease instead. Amounts, dates and accounts stay the same.`)) return;
+    for (const t of list) { t.kind = depositKindFor(t); delete t.period; await save('txns', t); }
+    toast('Converted'); render();
+  },
   fixOwners: async (d) => {
     const p = byId('properties', d.id);
     const out = [];

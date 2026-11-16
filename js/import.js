@@ -49,7 +49,7 @@ const FIELD = Object.fromEntries(IMPORT_FIELDS.map((f) => [f.key, f]));
 const unitLabel = (u) => `${propName(u.propertyId)} › ${u.name}`;
 function leaseImportLabel(l) {
   const u = byId('units', l.unitId);
-  return `${tenantName(l.tenantId) || 'Tenant'} · ${u ? unitLabel(u) : ''}${l.status === 'ended' ? ' (ended)' : ''}`;
+  return `${tenantName(l.tenantId) || 'Tenant'} · ${u ? unitLabel(u) : ''}${leaseIsCurrent(l) ? '' : ' (ended)'}`;
 }
 const personallyLabel = (p) => `${p.name} (personally)`;
 const allCategories = () => [...new Set([...Object.values(KINDS).flatMap((k) => k.cats), ...S.txns.map((t) => t.category).filter(Boolean)])];
@@ -225,7 +225,7 @@ function leaseCands(propertyId) {
   const ls = S.leases.filter((l) => !propertyId || byId('units', l.unitId)?.propertyId === propertyId);
   const byTenant = {};
   for (const l of ls) (byTenant[l.tenantId] = byTenant[l.tenantId] || []).push(l);
-  const out = ls.map((l) => ({ value: 'l:' + l.id, names: [leaseImportLabel(l), leaseImportLabel(l).replace(/ \(ended\)$/, ''), leaseLabel(l)] }));
+  const out = ls.map((l) => ({ value: 'l:' + l.id, names: [leaseImportLabel(l), leaseImportLabel(l).replace(/ \(ended\)$/, ''), leaseImportLabel(l) + ' (ended)', leaseLabel(l), leaseLabel(l).replace(/ \(ended\)$/, '')] }));
   // plain tenant name → the tenant's lease covering each row's date
   for (const [tid, list] of Object.entries(byTenant)) out.push({ value: list.length === 1 ? 'l:' + list[0].id : 't:' + tid, names: [tenantName(tid)] });
   return out;
@@ -391,6 +391,10 @@ function buildImport() {
     // category & rent month
     const rawCat = cellText(impCell(r, 'category'));
     t.category = rawCat ? (cats.find((c) => normName(c) === normName(rawCat)) || rawCat) : (KINDS[t.kind].cats.length === 1 ? KINDS[t.kind].cats[0] : t.kind === 'income' && t.leaseId ? 'Rent' : '');
+    // "Income" + category "Security deposit" is a deposit received (held for the tenant), not rent income
+    const depKind = depositKindFor(t);
+    if (depKind && t.leaseId) { warnings.push(`Recorded as “${KINDS[depKind].label}” because the category is “${t.category}”, so it counts under Deposit held`); t.kind = depKind; }
+    else if (depKind) warnings.push(`The category says security deposit — choose the tenant / lease so it is tracked as a deposit (otherwise it is imported as ${KINDS[t.kind].short.toLowerCase()})`);
     if ((t.kind === 'income' || t.kind === 'deposit_apply') && t.leaseId && /rent/i.test(t.category)) {
       const rawP = impCell(r, 'period');
       t.period = parseImportMonth(rawP, IMP.order) || (t.date || '').slice(0, 7);
