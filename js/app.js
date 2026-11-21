@@ -1278,6 +1278,8 @@ function txnForm(id, preset = {}) {
       e.preventDefault();
       pull(b);
       const amt = r2(num(t.amount));
+      const prevDate = isNew ? '' : byId('txns', t.id)?.date;
+      if (cutoff() && t.date && t.date <= cutoff() && t.date !== prevDate && !confirm(`You marked all transactions as recorded through ${fmtDate(cutoff())}.\n\nThis entry is dated ${fmtDate(t.date)}, inside that finished period. Add it anyway?`)) return;
       if (!(amt > 0)) return toast('Enter an amount greater than 0');
       if (!t.date) return toast('Enter a date');
       if (needsLease && !t.leaseId) return toast('Choose the lease this deposit belongs to');
@@ -1385,6 +1387,40 @@ function backupBanner() {
   return `<div class="banner"><div class="grow">${msg} Your data lives only on this iPhone — save a backup to Files/iCloud.</div><button class="btn sm" data-act="backup">Back up now</button></div>`;
 }
 
+// ---------------------------------------------------------------- "recorded through" date
+// The day up to which every transaction has been entered. New work starts the day after.
+const cutoff = () => S.settings.recordedThrough || '';
+const dayAfter = (d) => { const [y, m, dd] = d.split('-').map(Number); return ymd(new Date(y, m - 1, dd + 1)); };
+const lastTxnDate = () => S.txns.reduce((mx, t) => (t.date > mx ? t.date : mx), '');
+function cutoffCard() {
+  const c = cutoff();
+  if (!c) return `<div class="card pad cutoff"><div class="grow"><div class="t">📅 Recorded through — not set</div><div class="s">Mark the date up to which all transactions are entered, so next time you know where to start.</div></div><button class="btn sm" data-act="setCutoff">Set</button></div>`;
+  const after = S.txns.filter((t) => t.date > c).length;
+  return `<div class="card pad cutoff"><div class="grow"><div class="t">📅 Recorded through <b>${esc(fmtDate(c))}</b></div><div class="s">Next time, start from <b>${esc(fmtDate(dayAfter(c)))}</b>${after ? ` · ${plural(after, 'entry', 'entries')} already added after it` : ''}</div></div><button class="btn sm sec" data-act="setCutoff">Update</button></div>`;
+}
+function cutoffForm() {
+  const last = lastTxnDate();
+  openSheet('Recorded through', `<form class="form" id="f">
+    <div class="hint" style="margin:0 2px 12px">The date up to which <b>all</b> transactions (bank, cash, Zelle…) are entered in the app. Next time, start entering or importing from the day after. The app warns you if you add something dated on or before it, and the import skips such rows.</div>
+    ${field('All transactions recorded through', inp('d', cutoff() || last || today(), 'type="date" required'))}
+    <div class="btns" style="margin:0 0 12px">${last ? `<button type="button" class="btn sec sm" data-set="${last}">Last entry (${esc(fmtDate(last))})</button>` : ''}<button type="button" class="btn sec sm" data-set="${today()}">Today</button></div>
+    <button class="btn block">Save</button>
+    ${cutoff() ? '<button type="button" class="btn danger block" id="clr">Clear the date</button>' : ''}
+  </form>`, (b) => {
+    $$('[data-set]', b).forEach((x) => (x.onclick = () => { $('[name=d]', b).value = x.dataset.set; }));
+    $('#f', b).onsubmit = async (e) => {
+      e.preventDefault();
+      const d = readForm(b).d;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return toast('Choose a date');
+      if (d > today() && !confirm('That date is in the future. Save anyway?')) return;
+      S.settings.recordedThrough = d; S.settings.recordedThroughSetAt = new Date().toISOString(); markDirty();
+      closeSheet(); toast('Saved'); render();
+    };
+    const clr = $('#clr', b);
+    if (clr) clr.onclick = () => { S.settings.recordedThrough = ''; markDirty(); closeSheet(); render(); };
+  });
+}
+
 // ---------------------------------------------------------------- views
 const V = {};
 
@@ -1428,7 +1464,7 @@ V.home = () => {
   return {
     title: 'Estate Ledger',
     actions: [{ label: 'Back up', act: 'backup' }],
-    html: `${backupBanner()}${(() => { const n = dataIssues().length; return n ? `<a class="banner" href="#/check"><div class="grow">${n} thing${n === 1 ? '' : 's'} to review — duplicate names or partners used outside their property.</div><span class="btn sm">Review</span></a>` : ''; })()}
+    html: `${backupBanner()}${cutoffCard()}${(() => { const n = dataIssues().length; return n ? `<a class="banner" href="#/check"><div class="grow">${n} thing${n === 1 ? '' : 's'} to review — duplicate names or partners used outside their property.</div><span class="btn sm">Review</span></a>` : ''; })()}
       <div class="stats">
         <div class="stat"><div class="k">Rent ${esc(monthLabel(ym))}</div><div class="v">${money(collected)}</div><div class="x">of ${money(expected)} expected</div></div>
         <div class="stat"><div class="k">Outstanding rent</div><div class="v ${outstanding > 0 ? 'neg' : ''}">${money(outstanding)}</div><div class="x">all leases</div></div>
@@ -2030,6 +2066,7 @@ V.more = () => ({
       <a class="row" href="#/rentals/tenants"><div class="grow"><div class="t">🧑 Tenants</div></div></a>
       <a class="row" href="#/documents"><div class="grow"><div class="t">📎 Documents</div><div class="s">Statements, screenshots, receipts</div></div></a>
       <a class="row" href="#/reports"><div class="grow"><div class="t">📊 Reports</div><div class="s">Profit &amp; loss by year and property</div></div></a>
+      <div class="row nav" data-act="setCutoff"><div class="grow"><div class="t">📅 Recorded through</div><div class="s">${cutoff() ? esc(fmtDate(cutoff())) + ' · next start ' + esc(fmtDate(dayAfter(cutoff()))) : 'Not set'}</div></div></div>
       <a class="row" href="#/import"><div class="grow"><div class="t">📥 Import transactions</div><div class="s">Bulk-add past entries from Excel / CSV</div></div></a>
       <a class="row" href="#/check"><div class="grow"><div class="t">🩺 Data check</div><div class="s">${(() => { const n = dataIssues().length; return n ? `${n} thing${n === 1 ? '' : 's'} to review` : 'Duplicates, owners, mixed-up partners'; })()}</div></div></a>
     </div>
@@ -2402,6 +2439,7 @@ const ACTIONS = {
   exportLedger: () => exportLedger().catch((e) => alert('Export failed: ' + e.message)),
   backup: () => backup(true).catch((e) => alert('Backup failed: ' + e.message)),
   backupLite: () => backup(false).catch((e) => alert('Backup failed: ' + e.message)),
+  setCutoff: () => cutoffForm(),
   eraseAll: async () => {
     if (prompt('This deletes ALL properties, transactions and documents on this device. Type ERASE to confirm.') !== 'ERASE') return;
     await DB.clearAll();

@@ -593,6 +593,40 @@ function section(name) { console.log('\n' + name); }
     });
     eq(shared, { keys: ['files'], name: 'b.zip' }, 'navigator.share is called with the file only — no title/text');
 
+    section('“Recorded through” date');
+    await go('#/home');
+    ok((await page.textContent('#main')).includes('Recorded through — not set'), 'home shows it is not set yet');
+    await page.click('#main .cutoff [data-act=setCutoff]');
+    await page.waitForSelector(`${sheet} [name=d]`);
+    const lastD = await ev(() => lastTxnDate());
+    await page.click(`${sheet} [data-set="${lastD}"]`);
+    await submit();
+    eq(await ev(() => S.settings.recordedThrough), lastD, '“Last entry” button + Save sets the date to the last entry');
+    const nextD = await ev((d) => fmtDate(dayAfter(d)), lastD);
+    ok((await page.textContent('#main .cutoff')).includes('start from ' + nextD), 'home card says where to start next: ' + nextD);
+    eq(await ev(() => [dayAfter('2026-01-31'), dayAfter('2026-02-28'), dayAfter('2024-12-31')]), ['2026-02-01', '2026-03-01', '2025-01-01'], 'next day rolls over month and year ends');
+    await go('#/more');
+    ok((await page.textContent('#main')).includes('next start ' + nextD), 'More menu shows it too');
+    // adding an entry inside the finished period asks first
+    const nBefore = await ev(() => S.txns.length);
+    await ev((d) => txnForm(null, { kind: 'expense', propertyId: S.properties[0].id, date: d, amount: 5, category: 'Cleaning' }), lastD);
+    await page.waitForSelector(`${sheet} [name=viaMode]`);
+    answers.push(false); await submit();
+    ok(dialogLog.at(-1).includes('inside that finished period'), 'warns when the date is on or before the recorded-through date');
+    eq(await ev(() => S.txns.length), nBefore, 'cancel = not saved');
+    answers.push(true); await submit();
+    eq(await ev(() => S.txns.length), nBefore + 1, 'OK = saved anyway');
+    const added = await ev(() => S.txns.at(-1).id);
+    const logLen = dialogLog.length;
+    await ev((id) => txnForm(id), added);
+    await page.waitForSelector(`${sheet} [name=amount]`);
+    await fill('amount', 6); await submit();
+    eq(dialogLog.length, logLen, 'editing an old entry without changing its date does not ask');
+    await ev(async (id) => { await remove('txns', id); }, added);
+    await ev(() => cutoffForm()); await page.waitForSelector('#clr');
+    await page.click('#clr'); await page.waitForTimeout(150);
+    eq(await ev(() => S.settings.recordedThrough), '', 'Clear removes the date');
+
     section('Lease past its end date shows as Expired, not Upcoming');
     await ev(async () => { await save('leases', { id: 'l_exp', unitId: S.units[0].id, tenantId: S.tenants[0].id, startDate: '2025-08-01', endDate: '2025-12-31', status: 'active', rent: 2610, dueDay: 1 }); });
     await go('#/lease/l_exp');

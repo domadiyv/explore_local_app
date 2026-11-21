@@ -1,6 +1,6 @@
 // Service worker: caches the app so it runs fully offline after the first visit.
 // Bump VERSION whenever any app file changes so phones pick up the update.
-const VERSION = 'estate-ledger-v6';
+const VERSION = 'estate-ledger-v7';
 const ASSETS = [
   './',
   './index.html',

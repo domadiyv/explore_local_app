@@ -36,7 +36,12 @@ const unzipText = (file, member) => execFileSync('unzip', ['-p', file, member]).
   page.on('pageerror', (e) => errors.push(e.message));
   page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
   const answers = [];
-  page.on('dialog', async (d) => { const a = answers.length ? answers.shift() : undefined; if (a === false) return d.dismiss(); return typeof a === 'string' ? d.accept(a) : d.accept(); });
+  let acceptCutoff = false; // the "mark as recorded through …?" question after an import
+  const cutoffAsked = [];
+  page.on('dialog', async (d) => {
+    if (/Mark all transactions as recorded through/.test(d.message())) { cutoffAsked.push(d.message()); return acceptCutoff ? d.accept() : d.dismiss(); }
+    const a = answers.length ? answers.shift() : undefined; if (a === false) return d.dismiss(); return typeof a === 'string' ? d.accept(a) : d.accept();
+  });
   const ev = (fn, arg) => page.evaluate(fn, arg);
   const go = async (h) => { await ev((x) => { location.hash = x; }, h); await page.waitForTimeout(150); };
   // build an .xlsx in the page with the app's own writer and save it to disk
@@ -265,6 +270,31 @@ const unzipText = (file, member) => execFileSync('unzip', ['-p', file, member]).
     eq(await ev(() => JSON.stringify(partnerPositions(S.txns).pos)), pBefore, 'property / partnership balances unchanged');
     ok(await ev(() => S.txns.filter((t) => t.kind === 'personal').every((t) => !t.propertyId)), 'personal entries have no property');
     await ev(async () => { for (const t of S.txns.filter((x) => x.kind === 'personal')) await remove('txns', t.id); });
+
+    section('“Recorded through” date and imports');
+    await ev(async () => { S.settings.recordedThrough = '2026-06-30'; await saveSettings(); });
+    await go('#/import');
+    if (await page.$('#topActions button')) { await page.click('#topActions button'); await page.waitForTimeout(100); }
+    ok((await page.textContent('#main')).includes('Start your file from Jul 1, 2026'), 'import page says where to start');
+    const fc = await writeXlsx(path.join(TMP, 'cutoff.xlsx'), ['Date', 'Type', 'Amount', 'Property', 'Category', 'Description'], [
+      ['2026-06-15', 'Expense', 11, 'Maple', 'Cleaning', 'co before'],
+      ['2026-06-30', 'Expense', 12, 'Maple', 'Cleaning', 'co on'],
+      ['2026-07-01', 'Expense', 13, 'Maple', 'Cleaning', 'co after1'],
+      ['2026-07-09', 'Expense', 14, 'Maple', 'Cleaning', 'co after2'],
+    ]);
+    await chooseFile(fc);
+    eq((await summary()).ready, 2, 'rows on or before Jun 30 are skipped → 2 ready');
+    ok((await page.textContent('#main')).includes('Skip 2 rows dated on or before Jun 30, 2026'), 'explains the skipped rows');
+    await page.uncheck('#impSkipOld'); await page.waitForTimeout(150);
+    eq((await summary()).ready, 4, 'unticking includes them');
+    await page.check('#impSkipOld'); await page.waitForTimeout(150);
+    acceptCutoff = true; cutoffAsked.length = 0;
+    await doImport();
+    acceptCutoff = false;
+    eq(await ev(() => S.txns.filter((t) => /^co /.test(t.description)).map((t) => t.description).sort()), ['co after1', 'co after2'], 'only the new rows were imported');
+    ok(cutoffAsked.length === 1 && cutoffAsked[0].includes('Jul 9, 2026'), 'after importing it offers to move the date to the last imported day');
+    eq(await ev(() => S.settings.recordedThrough), '2026-07-09', 'recorded-through moved to Jul 9, 2026');
+    await ev(async () => { for (const t of S.txns.filter((x) => /^co /.test(x.description))) await remove('txns', t.id); S.settings.recordedThrough = ''; await saveSettings(); });
 
     section('Bank statement CSV (other column names, day/month dates, debit/credit)');
     const csv = 'Posted Date,Details,Debit,Credit,Balance\n' +
