@@ -10,6 +10,7 @@ const IMPORT_TYPES = [
   ['Deposit received', 'deposit_in'], ['Deposit refunded', 'deposit_out'], ['Deposit kept', 'deposit_apply'],
   ['Partner put money in', 'contribution'], ['Partner took money out', 'withdrawal'],
   ['Partner paid partner', 'settlement'], ['Transfer between accounts', 'transfer'],
+  ['Personal between partners', 'personal'],
 ];
 const TYPE_WORDS = {
   income: ['income', 'receipt', 'received', 'credit', 'cr', 'in', 'money in', 'rent received'],
@@ -20,6 +21,7 @@ const TYPE_WORDS = {
   contribution: ['contribution', 'capital', 'capital contribution', 'partner contribution', 'put in'],
   withdrawal: ['withdrawal', 'drawing', 'drawings', 'personal use', 'took out', 'partner withdrawal'],
   settlement: ['settlement', 'settle', 'partner payment'],
+  personal: ['personal', 'personal loan', 'personal between partners', 'personal money between partners', 'personal transfer', 'loan to partner', 'partner loan'],
   transfer: ['transfer', 'account transfer', 'internal transfer'],
 };
 // Columns the importer understands. `syn` = other headings that mean the same thing.
@@ -81,8 +83,8 @@ async function buildImportTemplate() {
     { header: 'Rent month', width: 12, validation: v('Rent month', months, { strict: false, prompt: 'Only for rent. Blank = month of the date' }) },
     { header: 'Paid from / received into', width: 28, validation: v('Paid from / received into', vias, { prompt: 'Blank = the property\'s common account' }) },
     { header: 'Collected / paid by', width: 18, validation: v('Partner', partners, { prompt: 'Optional note, when a common account was used' }) },
-    { header: 'Partner', width: 16, validation: v('Partner', partners, { prompt: 'Only for partner put in / took out / paid partner' }) },
-    { header: 'To partner', width: 16, validation: v('Partner', partners, { prompt: 'Only for partner paid partner' }) },
+    { header: 'Partner', width: 16, validation: v('Partner', partners, { prompt: 'Only for partner put in / took out / paid partner / personal' }) },
+    { header: 'To partner', width: 16, validation: v('Partner', partners, { prompt: 'Only for partner paid partner / personal' }) },
     { header: 'Account', width: 20, validation: v('Account', accs, { prompt: 'Only for partner put in / took out / transfer' }) },
     { header: 'To account', width: 20, validation: v('Account', accs, { prompt: 'Only for transfer' }) },
     { header: 'Description', width: 40 },
@@ -99,7 +101,8 @@ async function buildImportTemplate() {
     ['Paid from / received into', 'Blank = the property\'s common account (shared by all owners, nobody owes anyone). Pick an account, or “Name (personally)” if a partner paid from their own pocket or kept the money.', accs[0] || (S.partners[0] ? personallyLabel(S.partners[0]) : '')],
     ['Collected / paid by', 'Optional note of who collected / paid it when a common account was used. Does not change balances.', partners[1] || ''],
     ['Partner / Account', 'Only for “Partner put money in” and “Partner took money out”: which partner and which account.', ''],
-    ['To partner', 'Only for “Partner paid partner”: Partner = who paid, To partner = who received.', ''],
+    ['To partner', 'Only for “Partner paid partner” and “Personal between partners”: Partner = who paid, To partner = who received.', ''],
+    ['Personal between partners', 'Money between partners not related to any property (personal loan, repayment, paying the other\'s personal bill). Fill Partner and To partner; leave Property blank. Kept separate from property balances.', ''],
     ['Account / To account', 'Only for “Transfer between accounts”.', ''],
     ['Description', 'Anything — cheque no., invoice, notes.', 'Cheque 1234'],
     ['', '', ''],
@@ -423,11 +426,11 @@ function buildImport() {
       }
     }
     // partner / account fields
-    if (['contribution', 'withdrawal', 'settlement'].includes(t.kind)) {
+    if (['contribution', 'withdrawal', 'settlement', 'personal'].includes(t.kind)) {
       t.partnerId = R.partner(impCell(r, 'partner'));
       if (!t.partnerId) errors.push(cellText(impCell(r, 'partner')) ? `Partner “${cellText(impCell(r, 'partner'))}” not matched` : 'Partner is empty');
     }
-    if (t.kind === 'settlement') {
+    if (t.kind === 'settlement' || t.kind === 'personal') {
       t.toPartnerId = R.partner(impCell(r, 'toPartner'));
       if (!t.toPartnerId) errors.push('To partner is empty or not matched');
       else if (t.toPartnerId === t.partnerId) errors.push('Partner and To partner are the same');

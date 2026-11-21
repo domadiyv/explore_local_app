@@ -15,6 +15,7 @@ const KINDS = {
   contribution: { label: 'Partner put money into common account', short: 'Contribution', dir: 'none', cats: ['Capital contribution', 'Loan to partnership'] },
   withdrawal: { label: 'Partner took money from common account', short: 'Withdrawal', dir: 'none', cats: ['Personal use', 'Profit distribution', 'Loan repayment', 'Other'] },
   settlement: { label: 'Partner paid another partner', short: 'Settlement', dir: 'none', cats: ['Settlement'] },
+  personal: { label: 'Personal money between partners (not property)', short: 'Personal', dir: 'none', cats: ['Personal loan', 'Loan repayment', 'Paid a personal bill', 'Personal settlement', 'Other'] },
   transfer: { label: 'Transfer between accounts', short: 'Transfer', dir: 'none', cats: ['Transfer'] },
 };
 const PROPERTY_TYPES = ['Apartment building', 'House', 'Condo / flat', 'Townhouse', 'Commercial', 'Shop', 'Land', 'Other'];
@@ -134,6 +135,7 @@ function txnTitle(t) {
     case 'contribution': return `${partnerName(t.partnerId)} → ${accountName(t.accountId)}`;
     case 'withdrawal': return `${partnerName(t.partnerId)} took from ${accountName(t.accountId)}`;
     case 'settlement': return `${partnerName(t.partnerId)} paid ${partnerName(t.toPartnerId)}`;
+    case 'personal': return `${partnerName(t.partnerId)} → ${partnerName(t.toPartnerId)} (personal)`;
     case 'transfer': return `${accountName(t.accountId)} → ${accountName(t.toAccountId)}`;
     default: return t.category || k.label;
   }
@@ -252,6 +254,21 @@ function partnerPositions(txns) {
     } else if (t.kind === 'contribution') b(t.partnerId).contributed += a;
     else if (t.kind === 'withdrawal') b(t.partnerId).withdrawn += a;
     else if (t.kind === 'settlement') { b(t.partnerId).settledPaid += a; b(t.toPartnerId).settledReceived += a; }
+  }
+  for (const k of Object.keys(pos)) pos[k] = r2(pos[k]);
+  for (const k of Object.keys(br)) for (const f of Object.keys(br[k])) br[k][f] = r2(br[k][f]);
+  return { pos, br };
+}
+/* Personal money between partners is kept apart from the partnership: it never changes property
+   balances, accounts or P&L. The partner who paid (lent, or paid the other's bill) is owed it back. */
+function personalPositions(txns) {
+  const pos = {}, br = {};
+  const b = (pid) => (br[pid] = br[pid] || { paid: 0, received: 0 });
+  for (const t of txns) {
+    if (t.kind !== 'personal' || !t.partnerId || !t.toPartnerId) continue;
+    const a = r2(t.amount);
+    pos[t.partnerId] = (pos[t.partnerId] || 0) + a; b(t.partnerId).paid += a;
+    pos[t.toPartnerId] = (pos[t.toPartnerId] || 0) - a; b(t.toPartnerId).received += a;
   }
   for (const k of Object.keys(pos)) pos[k] = r2(pos[k]);
   for (const k of Object.keys(br)) for (const f of Object.keys(br[k])) br[k][f] = r2(br[k][f]);
@@ -604,7 +621,8 @@ async function viewFile(id, after) {
 async function shareBlob(blob, filename) {
   const file = new File([blob], filename, { type: blob.type || 'application/octet-stream' });
   if (navigator.canShare && navigator.canShare({ files: [file] })) {
-    try { await navigator.share({ files: [file], title: filename }); return true; }
+    // files only: with a title or text, iOS "Save to Files" also saves that text as an extra .txt file
+    try { await navigator.share({ files: [file] }); return true; }
     catch (e) { if (e.name === 'AbortError') return false; }
   }
   const url = URL.createObjectURL(blob);
@@ -1145,6 +1163,7 @@ function txnForm(id, preset = {}) {
         const wasDir = KINDS[prev.kind].dir, nowDir = KINDS[t.kind].dir;
         if (!t.via || !t.via.id || (wasDir !== nowDir && t.via.t === 'a' && viaKey(t.via) === viaKey(defaultVia(prev.kind, t.propertyId)))) t.via = defaultVia(t.kind, t.propertyId);
       }
+      if (t.kind === 'personal' && !t.partnerId) t.partnerId = selfPartner().id;
       if (t.kind === 'contribution' || t.kind === 'withdrawal') {
         if (!t.partnerId) t.partnerId = selfPartner().id;
         if (!t.accountId && S.accounts[0]) t.accountId = S.accounts[0].id;
@@ -1196,7 +1215,8 @@ function txnForm(id, preset = {}) {
       deposit_apply: 'Part of the deposit is kept (for unpaid rent, damages…). It becomes income; no money moves.',
       contribution: 'A partner puts their own money into a common account.',
       withdrawal: 'A partner takes money out of a common account for personal use or as profit share. It counts against that partner.',
-      settlement: 'One partner pays another directly to settle up balances.',
+      settlement: 'One partner pays another directly to settle up property / partnership balances.',
+      personal: 'Money between partners that has nothing to do with the properties — a personal loan, a repayment, or one partner paying the other\'s personal bill. Kept separately (More › Partners › Personal) and never mixed into property balances.',
       transfer: 'Move money between two common accounts.',
     }[k];
     b.innerHTML = `<form class="form" id="f">
@@ -1215,6 +1235,12 @@ function txnForm(id, preset = {}) {
           ${field(k === 'contribution' ? 'Into account' : 'From account', `<select name="accountId" data-rr>${accountOptions(t.accountId, S.accounts.length ? 'Choose…' : 'No accounts yet — add one in More › Accounts')}</select>`)}
         </div>
         ${field('Property (optional)', `<select name="propertyId" data-rr>${propertyOptions(t.propertyId, 'Not property-specific')}</select>`, 'Set this if the money was for / from one property, so the right owners share it.')}` : ''}
+      ${k === 'personal' ? `
+        <div class="two">
+          ${field('Paid by', `<select name="partnerId">${partnerOptions(t.partnerId, 'Choose…')}</select>`)}
+          ${field('Paid to / for', `<select name="toPartnerId">${partnerOptions(t.toPartnerId, 'Choose…')}</select>`)}
+        </div>
+        <div class="hint">The partner who paid is owed this back by the other (for a repayment, “Paid by” is the one repaying).</div>` : ''}
       ${k === 'settlement' ? `
         <div class="two">
           ${field('Paid by', `<select name="partnerId">${partnerOptions(t.partnerId, 'Choose…', partnersFor(t.propertyId, [t.partnerId, t.toPartnerId]))}</select>`)}
@@ -1258,7 +1284,7 @@ function txnForm(id, preset = {}) {
       if (VIA_KINDS.includes(k) && !t.via?.id) return toast(t.via?.t === 'p' ? (KINDS[k].dir === 'out' ? 'Choose which partner paid' : 'Choose which partner kept the money') : 'Choose the account');
       if (VIA_KINDS.includes(k) && t.via.id !== NEW_ACCOUNT && !(t.via.t === 'a' ? byId('accounts', t.via.id) : byId('partners', t.via.id))) return toast('Choose the account or partner again');
       if ((k === 'contribution' || k === 'withdrawal') && (!t.partnerId || !t.accountId)) return toast('Choose the partner and the account');
-      if (k === 'settlement' && (!t.partnerId || !t.toPartnerId || t.partnerId === t.toPartnerId)) return toast('Choose two different partners');
+      if ((k === 'settlement' || k === 'personal') && (!t.partnerId || !t.toPartnerId || t.partnerId === t.toPartnerId)) return toast('Choose two different partners');
       if (k === 'transfer' && (!t.accountId || !t.toAccountId || t.accountId === t.toAccountId)) return toast('Choose two different accounts');
       if (custom && !(t.split && sum(t.split, (s) => s.pct) > 0)) return toast('Enter the custom split percentages');
       const out = { id: t.id, kind: k, date: t.date, amount: amt, category: t.category || '', description: t.description || '', createdAt: t.createdAt };
@@ -1271,8 +1297,8 @@ function txnForm(id, preset = {}) {
         if (t.via.t === 'a' && t.handledBy) out.handledBy = t.handledBy;
       }
       if (k === 'deposit_apply') { const src = S.txns.find((x) => x.leaseId === t.leaseId && x.kind === 'deposit_in'); if (src) out.via = src.via; }
-      if (k === 'contribution' || k === 'withdrawal' || k === 'settlement') out.partnerId = t.partnerId;
-      if (k === 'settlement') out.toPartnerId = t.toPartnerId;
+      if (k === 'contribution' || k === 'withdrawal' || k === 'settlement' || k === 'personal') out.partnerId = t.partnerId;
+      if (k === 'settlement' || k === 'personal') out.toPartnerId = t.toPartnerId;
       if (k === 'contribution' || k === 'withdrawal' || k === 'transfer') out.accountId = t.accountId;
       if (k === 'transfer') out.toAccountId = t.toAccountId;
       if (custom && SPLIT_KINDS.includes(k)) out.split = t.split;
@@ -1655,6 +1681,9 @@ const PARTNER_ROLES = {
   settledReceived: { label: 'Settlements received', amt: (t, pid) => (t.kind === 'settlement' && t.toPartnerId === pid ? t.amount : 0) },
   shareIncome: { label: 'Share of income & deposits in', amt: (t, pid) => (isIn(t) ? r2(t.amount * (sharesFor(t)[pid] || 0)) : 0) },
   shareExpense: { label: 'Share of expenses & refunds', amt: (t, pid) => (isOut(t) ? r2(t.amount * (sharesFor(t)[pid] || 0)) : 0) },
+  personalPaid: { label: 'Personal: paid / lent', amt: (t, pid) => (t.kind === 'personal' && t.partnerId === pid ? t.amount : 0) },
+  personalReceived: { label: 'Personal: received', amt: (t, pid) => (t.kind === 'personal' && t.toPartnerId === pid ? t.amount : 0) },
+  personalNet: { label: 'Personal balance (+ owed / − owes)', signed: true, amt: (t, pid) => (t.kind !== 'personal' ? 0 : t.partnerId === pid ? t.amount : t.toPartnerId === pid ? -t.amount : 0) },
   net: { label: 'Effect on net position (+ owed / − owes)', signed: true, amt: (t, pid) => {
     const { cap, shares } = effects(t);
     const total = Object.values(cap).reduce((x, y) => x + y, 0);
@@ -1678,7 +1707,7 @@ function ledgerFilter(q) {
     if (role && who && Math.abs(PARTNER_ROLES[role].amt(t, who)) < 0.005) return false;
     if (k === 'in' && KINDS[t.kind].dir !== 'in') return false;
     if (k === 'out' && KINDS[t.kind].dir !== 'out') return false;
-    if (k === 'partner' && !['contribution', 'withdrawal', 'settlement'].includes(t.kind)) return false;
+    if (k === 'partner' && !['contribution', 'withdrawal', 'settlement', 'personal'].includes(t.kind)) return false;
     if (k && KINDS[k] && t.kind !== k) return false;
     if (vv) {
       const hit = vv.t === 'a' ? (viaKey(t.via) === v || t.accountId === vv.id || t.toAccountId === vv.id)
@@ -1752,8 +1781,39 @@ V.ledger = (sub, q) => {
 };
 
 // ---------------------------------------------------------------- partners
+const partnerScopeSelect = (p) => `<div class="filters"><select id="pf">${propertyOptions(p, 'All properties (partnership)')}${opt('personal', 'Personal — between partners', p)}</select></div>`;
+function personalPartnersView() {
+  const tx = S.txns.filter((t) => t.kind === 'personal');
+  const { pos, br } = personalPositions(tx);
+  const plan = settlePlan(pos);
+  const ids = S.partners.map((x) => x.id).filter((id) => br[id]);
+  const href = (key, id) => `#/ledger?role=${key}&who=${id}`;
+  const legacy = S.txns.filter((t) => t.kind === 'settlement' && !t.propertyId);
+  return {
+    title: 'Partners', back: '#/more',
+    actions: [{ label: '+ Personal', act: 'newPersonal' }],
+    html: `${partnerScopeSelect('personal')}
+      <div class="hint" style="margin:0 16px 8px">Money between partners that has nothing to do with the properties: personal loans, repayments, one partner paying another's personal bill. Kept apart from property balances, accounts and P&amp;L.</div>
+      <h2>Who owes whom (personal)</h2>
+      <div class="list">${ids.length ? ids.map((id) => { const v = pos[id] || 0; return `<div class="row"><div class="grow"><div class="t">${esc(partnerName(id))}</div></div><div class="r amt ${v > 0.005 ? 'pos' : v < -0.005 ? 'neg' : ''}">${v > 0.005 ? 'is owed ' + money(v) : v < -0.005 ? 'owes ' + money(-v) : 'settled ✓'}</div></div>`; }).join('') : '<div class="empty">No personal entries yet</div>'}</div>
+      ${plan.length ? `<h2>To square up</h2><div class="list">${plan.map((x) => `<div class="row"><div class="grow">${esc(partnerName(x.from))} → ${esc(partnerName(x.to))}</div><div class="amt">${money(x.amount)}</div><button class="btn sm" data-act="newTxn" data-kind="personal" data-category="Loan repayment" data-partner-id="${x.from}" data-to-partner-id="${x.to}" data-amount="${x.amount}">Record</button></div>`).join('')}</div>` : ''}
+      ${ids.length ? `<h2>Breakdown</h2><div class="card scroll-x"><table class="t"><thead><tr><th></th>${ids.map((id) => `<th class="n">${esc(partnerName(id))}</th>`).join('')}</tr></thead><tbody>
+        <tr><td>Paid / lent to a partner</td>${ids.map((id) => `<td class="n">${br[id].paid ? `<a href="${href('personalPaid', id)}">${money(br[id].paid)}</a>` : money(0)}</td>`).join('')}</tr>
+        <tr><td>Received from a partner</td>${ids.map((id) => `<td class="n">${br[id].received ? `<a href="${href('personalReceived', id)}">${money(br[id].received)}</a>` : money(0)}</td>`).join('')}</tr>
+        <tr class="tot"><td>Personal balance</td>${ids.map((id) => `<td class="n ${pos[id] > 0.005 ? 'pos' : pos[id] < -0.005 ? 'neg' : ''}"><a href="${href('personalNet', id)}" style="color:inherit">${money(pos[id] || 0, true)}</a></td>`).join('')}</tr>
+      </tbody></table></div>` : ''}
+      <h2>Personal entries (${tx.length}) <a class="h-act" href="#/ledger?k=personal">Ledger</a></h2>
+      ${txnList(tx, 30)}
+      ${legacy.length ? `<div class="card pad small" style="margin-top:12px">${plural(legacy.length, '“Partner paid partner” entry has', '“Partner paid partner” entries have')} no property. If ${legacy.length === 1 ? 'it was' : 'they were'} personal and not property-related, move ${legacy.length === 1 ? 'it' : 'them'} here:
+        <div class="btns" style="margin:8px 0 0"><a class="btn sm sec" href="#/ledger?k=settlement">Review</a><button class="btn sm" data-act="movePersonal">Move ${legacy.length === 1 ? 'it' : 'all ' + legacy.length} to personal</button></div></div>` : ''}
+      <div class="btns"><button class="btn" data-act="newPersonal">+ Personal entry</button></div>`,
+    bind(main) { $('#pf', main).onchange = (e) => { location.hash = '#/partners' + (e.target.value ? '?p=' + e.target.value : ''); }; },
+  };
+}
 V.partners = (sub, q) => {
   const p = q.get('p') || '';
+  if (p === 'personal') return personalPartnersView();
+  const personal = personalPositions(S.txns);
   const tx = p ? S.txns.filter((t) => t.propertyId === p) : S.txns;
   const { pos, br } = partnerPositions(tx);
   const plan = settlePlan(pos);
@@ -1771,7 +1831,7 @@ V.partners = (sub, q) => {
   return {
     title: 'Partners', back: '#/more',
     actions: [{ label: '+ Partner', act: 'newPartner' }],
-    html: `<div class="filters"><select id="pf">${propertyOptions(p, 'All properties')}</select></div>
+    html: `${partnerScopeSelect(p)}
       <h2>Who owes whom</h2>
       <div class="list">${ids.length ? ids.map((id) => { const v = pos[id] || 0; return `<div class="row"><div class="grow"><div class="t">${esc(partnerName(id))}${p && !owners.includes(id) ? ' <span class="chip warn-owner">not an owner</span>' : ''}</div></div><div class="r amt ${v > 0.005 ? 'pos' : v < -0.005 ? 'neg' : ''}">${v > 0.005 ? 'is owed ' + money(v) : v < -0.005 ? 'owes ' + money(-v) : 'settled ✓'}</div></div>`; }).join('') : '<div class="empty">No partner activity yet</div>'}</div>
       ${plan.length ? `<h2>Suggested settlement</h2><div class="list">${plan.map((x) => `<div class="row"><div class="grow">${esc(partnerName(x.from))} → ${esc(partnerName(x.to))}</div><div class="amt">${money(x.amount)}</div><button class="btn sm" data-act="newTxn" data-kind="settlement" data-partner-id="${x.from}" data-to-partner-id="${x.to}" data-amount="${x.amount}" data-property-id="${p}">Record</button></div>`).join('')}</div>` : ''}
@@ -1782,7 +1842,8 @@ V.partners = (sub, q) => {
       </tbody></table></div><div class="hint" style="margin:6px 16px">Tap any amount to see the entries behind it. Tap a net position to see how much each entry added to or took from it.</div>` : ''}
       <h2>${p ? 'Owners of ' + esc(propName(p)) : 'All partners'}</h2>
       <div class="list">${shown.map((x) => `<div class="row nav" data-act="editPartner" data-id="${x.id}"><div class="grow"><div class="t">${esc(x.name)}${x.isSelf ? ' <span class="chip">me</span>' : ''}${S.partners.some((y) => y.id !== x.id && normName(y.name) === normName(x.name)) ? ' <span class="chip warn-owner">duplicate name</span>' : ''}</div><div class="s">${esc(owns(x.id).join(' · ') || 'Owns no property')}${x.phone || x.email ? ' · ' + esc([x.phone, x.email].filter(Boolean).join(' · ')) : ''}</div></div></div>`).join('') || '<div class="empty">No owners set</div>'}</div>
-      <div class="btns"><a class="btn sec" href="#/ledger?k=partner${p ? '&p=' + p : ''}">Partner transactions</a></div>`,
+      <div class="btns"><a class="btn sec" href="#/ledger?k=partner${p ? '&p=' + p : ''}">Partner transactions</a></div>
+      ${Object.keys(personal.br).length ? `<a class="card pad row" href="#/partners?p=personal" style="display:flex"><div class="grow"><div class="t">Personal balances (kept separate)</div><div class="s">${esc(Object.entries(personal.pos).filter(([, v]) => v < -0.005).map(([id, v]) => `${partnerName(id)} owes ${money(-v)}`).join(' · ') || 'All settled ✓')}</div></div></a>` : ''}`,
     bind(main) {
       $('#pf', main).onchange = (e) => { location.hash = '#/partners' + (e.target.value ? '?p=' + e.target.value : ''); };
     },
@@ -2064,6 +2125,7 @@ V.help = () => ({
       <li><b>Partner put money in</b>: counts in their favour.</li>
       <li>Use <b>Custom split</b> on any entry to override the % (e.g. 100% for one partner).</li>
       <li>More › Partners shows who owes whom and a suggested settlement. Record the settlement payment to clear it.</li>
+      <li><b>Personal money between partners</b> (a personal loan, a repayment, paying the other's personal bill): record it with type “Personal money between partners”. It is kept separate: More › Partners › choose <b>Personal</b>. It never changes property balances, accounts or reports.</li>
     </ul>
     <h3>Rent &amp; deposits</h3>
     <ul>
@@ -2156,6 +2218,10 @@ function buildWorkbookSheets() {
     for (const id of ids) { const b = br[id] || {}; pbRows.push([scope, partnerName(id), b.paidPersonally || 0, b.receivedPersonally || 0, b.contributed || 0, b.withdrawn || 0, b.settledPaid || 0, b.settledReceived || 0, b.shareIncome || 0, b.shareExpense || 0, pos[id] || 0, (pos[id] || 0) > 0.005 ? 'is owed' : (pos[id] || 0) < -0.005 ? 'owes' : 'settled']); }
     for (const x of settlePlan(pos)) pbRows.push({ bold: true, cells: [scope, `Suggested: ${partnerName(x.from)} pays ${partnerName(x.to)}`, '', '', '', '', '', '', '', '', x.amount, ''] });
   }
+  // personal money between partners: its own scope, never part of the property balances above
+  const pp = personalPositions(S.txns);
+  for (const id of Object.keys(pp.br)) { const v = pp.pos[id] || 0; pbRows.push(['Personal (between partners)', partnerName(id), '', '', '', '', pp.br[id].paid, pp.br[id].received, '', '', v, v > 0.005 ? 'is owed' : v < -0.005 ? 'owes' : 'settled']); }
+  for (const x of settlePlan(pp.pos)) pbRows.push({ bold: true, cells: ['Personal (between partners)', `Suggested: ${partnerName(x.from)} pays ${partnerName(x.to)}`, '', '', '', '', '', '', '', '', x.amount, ''] });
   sheets.push({
     name: 'Partner balances',
     columns: [{ header: 'Scope' }, { header: 'Partner' }, { header: 'Paid expenses personally', type: 'money' }, { header: 'Received income personally', type: 'money' }, { header: 'Put into common account', type: 'money' }, { header: 'Took from common account', type: 'money' }, { header: 'Settlements paid', type: 'money' }, { header: 'Settlements received', type: 'money' }, { header: 'Share of income & deposits received', type: 'money' }, { header: 'Share of expenses & deposit refunds', type: 'money' }, { header: 'Net position (+ owed / − owes)', type: 'money' }, { header: 'Status' }],
@@ -2309,6 +2375,13 @@ const ACTIONS = {
   editTenant: (d) => tenantForm(d.id),
   newPartner: () => partnerForm(),
   editPartner: (d) => partnerForm(d.id),
+  newPersonal: () => txnForm(null, { kind: 'personal', category: 'Personal loan', partnerId: selfPartner().id }),
+  movePersonal: async () => {
+    const list = S.txns.filter((t) => t.kind === 'settlement' && !t.propertyId);
+    if (!confirm(`Move ${plural(list.length, 'entry', 'entries')} from partnership settlements to personal?\n\nThey will no longer count in the property / partnership balances, only under Personal.`)) return;
+    for (const t of list) { t.kind = 'personal'; if (!t.category || t.category === 'Settlement') t.category = 'Personal settlement'; delete t.propertyId; await save('txns', t); }
+    toast('Moved'); render();
+  },
   merge: (d) => mergeForm(d.store, d.id),
   convertDeposits: async () => {
     const list = S.txns.filter((t) => depositKindFor(t) && t.leaseId);

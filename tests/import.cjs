@@ -251,6 +251,21 @@ const unzipText = (file, member) => execFileSync('unzip', ['-p', file, member]).
     await go('#/check');
     const after = await page.textContent('#main'); ok(!after.includes('category says security deposit'), 'nothing left to convert: ' + after.slice(0, 400));
 
+    section('Personal money between partners');
+    const fp = await writeXlsx(path.join(TMP, 'personal.xlsx'), ['Date', 'Type', 'Amount', 'Partner', 'To partner', 'Description'], [
+      ['2026-11-01', 'Personal between partners', 1000, 'Viraj', 'Raj', 'pers loan'],
+      ['2026-11-10', 'Personal loan', 300, 'Raj', 'Viraj', 'pers repay'],
+      ['2026-11-11', 'Personal between partners', 50, 'Raj', '', 'pers missing'],
+    ]);
+    const pBefore = await ev(() => JSON.stringify(partnerPositions(S.txns).pos));
+    await chooseFile(fp);
+    eq(await summary(), { ready: 2, bad: 1, dup: 0 }, 'two personal rows ready, one missing “To partner”');
+    await doImport();
+    eq(await ev(() => personalPositions(S.txns).pos), { [await ev(() => selfPartner().id)]: 700, raj: -700 }, 'imported personal entries: Raj owes Viraj 700');
+    eq(await ev(() => JSON.stringify(partnerPositions(S.txns).pos)), pBefore, 'property / partnership balances unchanged');
+    ok(await ev(() => S.txns.filter((t) => t.kind === 'personal').every((t) => !t.propertyId)), 'personal entries have no property');
+    await ev(async () => { for (const t of S.txns.filter((x) => x.kind === 'personal')) await remove('txns', t.id); });
+
     section('Bank statement CSV (other column names, day/month dates, debit/credit)');
     const csv = 'Posted Date,Details,Debit,Credit,Balance\n' +
       '31/01/2025,"RENT JOHN SMITH, JAN",,"1,500.00",9000\n' +
