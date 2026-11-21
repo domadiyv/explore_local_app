@@ -209,3 +209,6 @@ details > summary { cursor: pointer; }
 .row .role-amt { font-size: 13px; font-weight: 600; margin-top: 2px; color: var(--accent); }
 .role-banner { color: var(--text); background: var(--accent-soft); }
 table.t td.n { white-space: nowrap; }
+.cutoff { display: flex; align-items: center; gap: 10px; }
+.cutoff .grow { flex: 1; min-width: 0; }
+.cutoff .s { font-size: 13px; color: var(--muted); }

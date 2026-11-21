@@ -261,7 +261,7 @@ function autoColMap(headers) {
 }
 function startImport(fileName, sheets) {
   const idx = Math.max(0, sheets.findIndex((s) => !s.hidden && /transactions|ledger/i.test(s.name)));
-  IMP = { fileName, sheets, map: {}, skipDup: true, filter: 'all' };
+  IMP = { fileName, sheets, map: {}, skipDup: true, skipOld: true, filter: 'all' };
   selectSheet(sheets[idx] && !sheets[idx].hidden ? idx : Math.max(0, sheets.findIndex((s) => !s.hidden)));
 }
 function selectSheet(i) {
@@ -457,14 +457,17 @@ function buildImport() {
     else if (t.date && existing.has(dupKey(t))) { const x = existing.get(dupKey(t)); dup = `Looks like an existing entry: ${txnTitle(x)} on ${fmtDate(x.date)}`; }
     const fk = dupKey(t) + '|' + t.description;
     if (fileKeys.has(fk)) warnings.push(`Same as row ${fileKeys.get(fk)} in this file`); else fileKeys.set(fk, rowNo);
-    out.push({ rowNo, txn: t, errors, warnings, dup });
+    const old = !!(cutoff() && t.date && t.date <= cutoff());
+    out.push({ rowNo, txn: t, errors, warnings, dup, old });
   }
   return { rows: out, pending: R.pending, newAccounts };
 }
 
 // ---------------------------------------------------------------- commit & undo
+// Rows that will be imported: no problems, and not skipped as a duplicate or as already recorded.
+const willImport = (x) => !x.errors.length && !(x.dup && IMP.skipDup) && !(x.old && IMP.skipOld);
 async function commitImport(built) {
-  const pick = built.rows.filter((x) => !x.errors.length && !(x.dup && IMP.skipDup));
+  const pick = built.rows.filter(willImport);
   if (!pick.length) return toast('Nothing to import');
   const importId = 'imp_' + uid();
   const created = { accounts: [], partners: [] };
@@ -495,6 +498,11 @@ async function commitImport(built) {
   S.settings.imports = [{ id: importId, at: new Date().toISOString(), fileName: IMP.fileName, count: txns.length, created }, ...(S.settings.imports || [])].slice(0, 30);
   markDirty();
   IMP = null;
+  // offer to move the "recorded through" date up to the last imported day
+  const last = txns.reduce((mx, t) => (t.date > mx ? t.date : mx), '');
+  if (last && last > cutoff() && last <= today() && confirm(`Imported ${plural(txns.length, 'entry', 'entries')}, the last one dated ${fmtDate(last)}.\n\nMark all transactions as recorded through ${fmtDate(last)}?${cutoff() ? `\n(It is ${fmtDate(cutoff())} now.)` : ''}\n\nNext time you'd start from ${fmtDate(dayAfter(last))}.`)) {
+    S.settings.recordedThrough = last; S.settings.recordedThroughSetAt = new Date().toISOString(); markDirty();
+  }
   toast(`Imported ${txns.length} entr${txns.length === 1 ? 'y' : 'ies'}`);
   location.hash = '#/ledger';
   render();
@@ -557,6 +565,7 @@ V.import = () => {
       title: 'Import', back: '#/more',
       html: `<div class="card pad" style="margin-top:12px">
           <div class="t" style="font-weight:600;margin-bottom:6px">Add many past entries at once</div>
+          ${cutoff() ? `<div class="card pad small" style="margin:0 0 10px;background:var(--accent-soft)">📅 All transactions are recorded through <b>${esc(fmtDate(cutoff()))}</b>. Start your file from <b>${esc(fmtDate(dayAfter(cutoff())))}</b> — older rows are skipped automatically.</div>` : ''}
           <ol class="small" style="padding-left:18px;margin:0 0 12px">
             <li>Download the template. Its columns have <b>dropdown lists with your own properties, units, tenants, partners and accounts</b>, so you pick instead of typing.</li>
             <li>Fill in one row per payment in Excel, Numbers or Google Sheets.</li>
@@ -594,12 +603,13 @@ V.import = () => {
   const colOpts = (key) => opt('', '— not in file —', IMP.colMap[key] ?? '') + headers.map((h, i) => opt(i, `${cellText(h) || Xlsx.colName(i)}${sample(i) ? ' (e.g. ' + sample(i) + ')' : ''}`, IMP.colMap[key] ?? '')).join('');
   const hasAmount = ['amount', 'moneyIn', 'moneyOut'].some((k) => IMP.colMap[k] !== undefined);
   const colsOk = IMP.colMap.date !== undefined && hasAmount;
-  const ready = built.rows.filter((x) => !x.errors.length && !(x.dup && IMP.skipDup));
+  const ready = built.rows.filter(willImport);
   const bad = built.rows.filter((x) => x.errors.length);
   const dups = built.rows.filter((x) => !x.errors.length && x.dup);
+  const olds = built.rows.filter((x) => !x.errors.length && x.old);
   const pendingList = Object.entries(built.pending).flatMap(([field, obj]) => Object.entries(obj).map(([key, info]) => ({ field, key, info })));
   const unresolved = pendingList.filter(({ field, key }) => IMP.map[field]?.[key] === undefined);
-  const shown = built.rows.filter((x) => IMP.filter === 'all' || (IMP.filter === 'bad' ? x.errors.length : IMP.filter === 'dup' ? x.dup && !x.errors.length : IMP.filter === 'warn' ? x.warnings.length && !x.errors.length : !x.errors.length && !(x.dup && IMP.skipDup)));
+  const shown = built.rows.filter((x) => IMP.filter === 'all' || (IMP.filter === 'bad' ? x.errors.length : IMP.filter === 'dup' ? x.dup && !x.errors.length : IMP.filter === 'warn' ? x.warnings.length && !x.errors.length : IMP.filter === 'old' ? x.old && !x.errors.length : willImport(x)));
   const txLine = (t) => [KINDS[t.kind]?.short, t.propertyId && propName(t.propertyId), t.unitId && unitName(t.unitId), t.leaseId && tenantName(byId('leases', t.leaseId)?.tenantId), t.category, t.period && 'for ' + monthLabel(t.period),
     t.via && (t.via.id?.startsWith('__new:') ? 'into new ' + (built.newAccounts[t.via.id.slice(6)] || 'account') : (KINDS[t.kind].dir === 'out' ? 'paid from ' : 'into ') + viaLabel(t.via)),
     t.handledBy && 'by ' + partnerName(t.handledBy), t.partnerId && partnerName(t.partnerId) + (t.toPartnerId ? ' → ' + partnerName(t.toPartnerId) : ''), t.accountId && accountName(t.accountId) + (t.toAccountId ? ' → ' + accountName(t.toAccountId) : '')].filter(Boolean).join(' · ');
@@ -635,11 +645,12 @@ V.import = () => {
         <div class="stat"><div class="k">Duplicates?</div><div class="v ${dups.length ? 'warn' : ''}" style="font-size:18px">${dups.length}</div><div class="x">${IMP.skipDup ? 'skipped' : 'imported'}</div></div>
       </div>
       ${dups.length ? `<label class="check" style="margin:4px 16px 8px"><input type="checkbox" id="impSkipDup" ${IMP.skipDup ? 'checked' : ''}> Skip entries that look like ones already in the app</label>` : ''}
+      ${olds.length ? `<label class="check" style="margin:4px 16px 8px"><input type="checkbox" id="impSkipOld" ${IMP.skipOld ? 'checked' : ''}> Skip ${plural(olds.length, 'row', 'rows')} dated on or before ${esc(fmtDate(cutoff()))} (already recorded)</label>` : ''}
       ${Object.keys(built.newAccounts).length ? `<div class="hint" style="margin:0 16px 8px">Will also create: ${esc(Object.values(built.newAccounts).join(', '))} (for entries with a blank “Paid from / received into”).</div>` : ''}
       <div class="btns"><button class="btn block" id="impGo" ${ready.length && colsOk ? '' : 'disabled'}>Import ${plural(ready.length, 'entry', 'entries')}</button></div>
-      <div class="filters">${impSel('id="impFilter"', opt('all', `All rows (${built.rows.length})`, IMP.filter) + opt('ok', `Will be imported (${ready.length})`, IMP.filter) + opt('bad', `Problems (${bad.length})`, IMP.filter) + opt('dup', `Possible duplicates (${dups.length})`, IMP.filter) + opt('warn', `Warnings (${built.rows.filter((x) => x.warnings.length && !x.errors.length).length})`, IMP.filter))}</div>
-      <div class="list">${shown.slice(0, 300).map((x) => { const t = x.txn; const skip = x.errors.length || (x.dup && IMP.skipDup); return `<div class="row imp-row${skip ? ' skip' : ''}"><div class="grow">
-          <div class="t">${x.errors.length ? '<span class="chip bad">Problem</span> ' : x.dup ? '<span class="chip warn">Duplicate?</span> ' : '<span class="chip ok">✓</span> '}${esc(t.date ? fmtDate(t.date) : '—')} · ${esc(t.kind && !x.errors.some((e) => /type/i.test(e)) ? (t.category || KINDS[t.kind].short) : '?')}</div>
+      <div class="filters">${impSel('id="impFilter"', opt('all', `All rows (${built.rows.length})`, IMP.filter) + opt('ok', `Will be imported (${ready.length})`, IMP.filter) + opt('bad', `Problems (${bad.length})`, IMP.filter) + opt('dup', `Possible duplicates (${dups.length})`, IMP.filter) + (olds.length ? opt('old', `Already recorded period (${olds.length})`, IMP.filter) : '') + opt('warn', `Warnings (${built.rows.filter((x) => x.warnings.length && !x.errors.length).length})`, IMP.filter))}</div>
+      <div class="list">${shown.slice(0, 300).map((x) => { const t = x.txn; const skip = !willImport(x); return `<div class="row imp-row${skip ? ' skip' : ''}"><div class="grow">
+          <div class="t">${x.errors.length ? '<span class="chip bad">Problem</span> ' : x.old && IMP.skipOld ? '<span class="chip">Already recorded</span> ' : x.dup ? '<span class="chip warn">Duplicate?</span> ' : '<span class="chip ok">✓</span> '}${esc(t.date ? fmtDate(t.date) : '—')} · ${esc(t.kind && !x.errors.some((e) => /type/i.test(e)) ? (t.category || KINDS[t.kind].short) : '?')}</div>
           <div class="s">Row ${x.rowNo} · ${esc(txLine(t))}</div>
           ${t.description ? `<div class="d">${esc(t.description)}</div>` : ''}
           ${[...x.errors.map((e) => `<div class="small err">✗ ${esc(e)}</div>`), x.dup ? `<div class="small warn">${esc(x.dup)}</div>` : '', ...x.warnings.map((w) => `<div class="small warn">⚠ ${esc(w)}</div>`)].join('')}
@@ -652,6 +663,7 @@ V.import = () => {
       on('#impHead', (e) => { IMP.headerRow = +e.target.value; resetColumns(); render(); });
       on('#impOrder', (e) => { IMP.order = e.target.value; IMP.orderSure = true; render(); });
       on('#impSkipDup', (e) => { IMP.skipDup = e.target.checked; render(); });
+      on('#impSkipOld', (e) => { IMP.skipOld = e.target.checked; render(); });
       on('#impFilter', (e) => { IMP.filter = e.target.value; render(); });
       on('#impDefProp', (e) => { IMP.defProp = e.target.value; render(); });
       on('#impDefVia', (e) => { IMP.defVia = e.target.value; render(); });
@@ -669,7 +681,7 @@ V.import = () => {
       const go = $('#impGo', main);
       if (go) go.onclick = async () => {
         const b = buildImport();
-        const n = b.rows.filter((x) => !x.errors.length && !(x.dup && IMP.skipDup)).length;
+        const n = b.rows.filter(willImport).length;
         const nb = b.rows.filter((x) => x.errors.length).length;
         if (!confirm(`Import ${plural(n, 'entry', 'entries')}?${nb ? `\n\n${plural(nb, 'row has', 'rows have')} problems and will NOT be imported.` : ''}\n\nYou can undo this later from More › Import.`)) return;
         go.disabled = true;
