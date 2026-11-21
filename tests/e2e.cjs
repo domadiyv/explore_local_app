@@ -542,6 +542,56 @@ function section(name) { console.log('\n' + name); }
     ok((await page.$$('#main .role-amt')).length > 0, 'each entry shows that partner’s part');
     await page.click('.role-banner a'); await page.waitForTimeout(150);
     ok(!(await page.$('.role-banner')), 'Clear removes the partner filter');
+    for (const h of ['#/home', '#/property/' + maple, '#/ledger', '#/lease/' + (await ev(() => S.leases[0].id))]) {
+      await go(h);
+      ok((await page.$$('#main .role-amt')).length === 0 && (await page.$$('#main .row.nav')).length > 0, 'no stray numbers under entries on ' + h);
+    }
+
+    section('Personal money between partners is kept separate');
+    const snap = () => ev(() => JSON.stringify({ pos: partnerPositions(S.txns).pos, acc: S.accounts.map((a) => accountBalance(a.id)), pl: plData(today().slice(0, 4), '').net }));
+    const beforeP = await snap();
+    await go('#/partners?p=personal');
+    ok((await page.textContent('#main')).includes('No personal entries yet'), 'Personal view starts empty');
+    await page.click('#main [data-act=newPersonal]');
+    await page.waitForSelector(`${sheet} [name=toPartnerId]`);
+    eq(await page.$eval(`${sheet} [name=kind]`, (e) => e.value), 'personal', 'form opens as a personal entry');
+    await sel('partnerId', v); await sel('toPartnerId', v);
+    await fill('amount', 1000); await submit();
+    ok((await toastText()).includes('two different partners'), 'same partner twice is refused');
+    await sel('toPartnerId', r); await fill('description', 'Loan to Raj for car'); await submit();
+    await ev((x) => txnForm(null, { kind: 'personal', category: 'Loan repayment', partnerId: x.r, toPartnerId: x.v, amount: 400 }), { r, v });
+    await page.waitForSelector(`${sheet} [name=toPartnerId]`); await submit();
+    eq(await ev(() => personalPositions(S.txns).pos), { [v]: 600, [r]: -600 }, 'personal balance: Raj owes Viraj 600');
+    eq(await snap(), beforeP, 'property balances, account balances and P&L are unchanged');
+    await go('#/partners?p=personal');
+    const pv = await page.textContent('#main');
+    ok(pv.includes('owes $600.00') && pv.includes('Loan to Raj for car'), 'Personal view shows who owes whom and the entries');
+    eq(await ev((id) => sum(ledgerFilter(new URLSearchParams('role=personalNet&who=' + id)).list, (t) => PARTNER_ROLES.personalNet.amt(t, id)), r), -600, 'tapping Raj’s personal balance lists entries adding up to −600');
+    await go('#/partners');
+    ok((await page.textContent('#main')).includes('Personal balances (kept separate)'), 'partnership view links to the separate personal balances');
+    await go('#/partners?p=personal');
+    await page.click('#main button[data-kind=personal][data-act=newTxn]');
+    await page.waitForSelector(`${sheet} [name=toPartnerId]`); await submit();
+    eq(await ev(() => Object.values(personalPositions(S.txns).pos).filter((x) => Math.abs(x) > 0.005)), [], '“Record” on the suggestion squares up personal balances');
+    // old non-property settlements can be moved to personal
+    await ev(async (x) => { await save('txns', { id: 'oldPers', kind: 'settlement', date: '2026-01-02', amount: 50, category: 'Settlement', partnerId: x.a, toPartnerId: x.v }); render(); }, { a, v });
+    await go('#/partners?p=personal');
+    ok((await page.textContent('#main')).includes('“Partner paid partner” entry has no property'), 'offers to move old settlements without a property');
+    answers.push(true); await page.click('[data-act=movePersonal]'); await page.waitForTimeout(200);
+    eq(await ev(() => [byId('txns', 'oldPers').kind, byId('txns', 'oldPers').category]), ['personal', 'Personal settlement'], 'moved to personal');
+    const pbx = await ev(() => buildWorkbookSheets().find((s) => s.name === 'Partner balances').rows.filter((r) => (Array.isArray(r) ? r : r.cells)[0] === 'Personal (between partners)').length);
+    ok(pbx >= 2, 'Excel Partner balances sheet has a separate Personal section');
+    await ev(async () => { for (const t of S.txns.filter((x) => x.kind === 'personal')) await remove('txns', t.id); });
+
+    section('Backup share sheet gets only the file (no extra .txt)');
+    const shared = await ev(async () => {
+      let got = null;
+      Object.defineProperty(navigator, 'canShare', { value: () => true, configurable: true });
+      Object.defineProperty(navigator, 'share', { value: async (d) => { got = d; }, configurable: true });
+      await shareBlob(new Blob(['x'], { type: 'application/zip' }), 'b.zip');
+      return { keys: Object.keys(got).sort(), name: got.files[0].name };
+    });
+    eq(shared, { keys: ['files'], name: 'b.zip' }, 'navigator.share is called with the file only — no title/text');
 
     section('Lease past its end date shows as Expired, not Upcoming');
     await ev(async () => { await save('leases', { id: 'l_exp', unitId: S.units[0].id, tenantId: S.tenants[0].id, startDate: '2025-08-01', endDate: '2025-12-31', status: 'active', rent: 2610, dueDay: 1 }); });
