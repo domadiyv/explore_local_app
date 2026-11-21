@@ -542,6 +542,10 @@ function section(name) { console.log('\n' + name); }
     ok((await page.$$('#main .role-amt')).length > 0, 'each entry shows that partner’s part');
     await page.click('.role-banner a'); await page.waitForTimeout(150);
     ok(!(await page.$('.role-banner')), 'Clear removes the partner filter');
+    for (const h of ['#/home', '#/property/' + maple, '#/ledger', '#/lease/' + (await ev(() => S.leases[0].id))]) {
+      await go(h);
+      ok((await page.$$('#main .role-amt')).length === 0 && (await page.$$('#main .row.nav')).length > 0, 'no stray numbers under entries on ' + h);
+    }
 
     section('Lease past its end date shows as Expired, not Upcoming');
     await ev(async () => { await save('leases', { id: 'l_exp', unitId: S.units[0].id, tenantId: S.tenants[0].id, startDate: '2025-08-01', endDate: '2025-12-31', status: 'active', rent: 2610, dueDay: 1 }); });

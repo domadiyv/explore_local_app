@@ -1317,7 +1317,7 @@ function txnList(txns, limit) {
   const sorted = [...txns].sort((a, b) => (b.date + (b.createdAt || '')).localeCompare(a.date + (a.createdAt || '')));
   const shown = limit ? sorted.slice(0, limit) : sorted;
   if (!shown.length) return '<div class="list"><div class="empty">No transactions yet</div></div>';
-  return `<div class="list">${shown.map(txnRow).join('')}</div>`;
+  return `<div class="list">${shown.map((t) => txnRow(t)).join('')}</div>`;
 }
 function rentStatus(l, ym) {
   const paid = paidForPeriod(l, ym);
