@@ -5,6 +5,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { chromium } = require('playwright');
+const { execFileSync } = require('child_process');
 
 const NEW_ROOT = path.resolve(__dirname, '..');
 let root = NEW_ROOT;
@@ -132,12 +133,12 @@ function section(name) { console.log('\n' + name); }
     ok(await ev(() => selfPartner().name === 'Viraj'), 'renamed "Me" to Viraj');
     await go('#/partners');
     for (const n of ['Raj', 'Amit']) {
-      await page.click('#topActions button');
+      await page.click('#topActions button:has-text("+ Partner")');
       await fill('name', n); await submit();
     }
     eq(await ev(() => S.partners.map((p) => p.name).sort()), ['Amit', 'Raj', 'Viraj'], 'three partners');
     // duplicate name (different case/spaces) → warned; cancel keeps it out
-    await page.click('#topActions button');
+    await page.click('#topActions button:has-text("+ Partner")');
     await fill('name', '  raj '); answers.push(false); await submit();
     ok(dialogLog.at(-1).includes('already exists'), 'warned about duplicate partner name');
     eq(await ev(() => S.partners.length), 3, 'duplicate not saved when cancelled');
@@ -419,7 +420,7 @@ function section(name) { console.log('\n' + name); }
 
     section('Partner merge moves everything');
     await go('#/partners');
-    await page.click('#topActions button');
+    await page.click('#topActions button:has-text("+ Partner")');
     await fill('name', 'Amit'); answers.push(true); await submit();
     const amit2 = await ev(() => S.partners.filter((p) => p.name === 'Amit').at(-1).id);
     await ev(async (id) => {
@@ -546,6 +547,58 @@ function section(name) { console.log('\n' + name); }
       await go(h);
       ok((await page.$$('#main .role-amt')).length === 0 && (await page.$$('#main .row.nav')).length > 0, 'no stray numbers under entries on ' + h);
     }
+
+    section('Excel for your partner: formulas reproduce the app’s numbers');
+    // unsettled entries of every shape: paid personally with a custom split, kept personally, a withdrawal
+    await ev(async (x) => {
+      await save('txns', { id: 'rp1', kind: 'expense', date: '2026-10-01', amount: 300, category: 'Repairs & maintenance', propertyId: x.maple, via: { t: 'p', id: x.a }, split: [{ partnerId: x.v, pct: 50 }, { partnerId: x.r, pct: 30 }, { partnerId: x.a, pct: 20 }] });
+      await save('txns', { id: 'rp2', kind: 'income', date: '2026-10-02', amount: 1000, category: 'Rent', propertyId: x.maple, via: { t: 'p', id: x.r } });
+      await save('txns', { id: 'rp3', kind: 'withdrawal', date: '2026-10-03', amount: 90, category: 'Personal use', propertyId: x.maple, partnerId: x.v, accountId: S.accounts[0].id });
+    }, { maple, v, r, a });
+    const scopes = ['', ...(await ev(() => S.properties.map((p) => p.id)))];
+    const rep = await ev((scopes) => scopes.map((p) => {
+      const sh = partnerReportSheets(p);
+      const { pos } = partnerPositions(p ? S.txns.filter((t) => t.propertyId === p) : S.txns);
+      const sum = sh[0].rows.map((r) => (Array.isArray(r) ? r : r.cells)).filter((c) => / balance$/.test(c[0])).map((c) => [c[0].replace(/: balance$/, ''), c[1].v]);
+      const app = Object.fromEntries(Object.entries(pos).filter(([, v]) => Math.abs(v) > 0.005).map(([id, v]) => [partnerName(id), v]));
+      return { p, sum, app, names: sh.map((s) => s.name) };
+    }), scopes);
+    for (const x of rep) {
+      const got = Object.fromEntries(x.sum.filter(([, v]) => Math.abs(v) > 0.005));
+      ok(Object.keys(x.app).length === Object.keys(got).length && Object.entries(x.app).every(([k, v]) => Math.abs(got[k] - v) < 0.02), `report balances = app balances (${x.p || 'all properties'}): ${JSON.stringify(got)}`);
+    }
+    eq(rep[0].names, ['Summary', 'Entries', 'How it works'], 'sheets: Summary, Entries, How it works');
+    await go('#/partners?p=' + maple);
+    await page.click('#topActions button:has-text("Excel")');
+    await page.waitForSelector(`${sheet} [name=p]`);
+    eq(await page.$eval(`${sheet} [name=p]`, (e) => e.value), maple, 'opened from a property’s partner page: that property is preselected');
+    await submit();
+    await page.waitForSelector('#doShare');
+    const [rdl] = await Promise.all([page.waitForEvent('download'), page.click('#doShare')]);
+    ok(/^Partner_report_Maple_\d{4}-\d{2}-\d{2}\.xlsx$/.test(rdl.suggestedFilename()), 'file name: ' + rdl.suggestedFilename());
+    const rpath = path.join(require('os').tmpdir(), 'el-report.xlsx');
+    await rdl.saveAs(rpath);
+    let hasSoffice = false; try { execFileSync('which', ['soffice']); hasSoffice = true; } catch { /* not installed */ }
+    if (hasSoffice) {
+      // remove the stored results so the spreadsheet program must calculate every formula itself
+      const work = fs.mkdtempSync(path.join(require('os').tmpdir(), 'el-rep-'));
+      execFileSync('unzip', ['-q', rpath, '-d', path.join(work, 'x')]);
+      for (const f of fs.readdirSync(path.join(work, 'x/xl/worksheets'))) {
+        const p = path.join(work, 'x/xl/worksheets', f);
+        fs.writeFileSync(p, fs.readFileSync(p, 'utf8').replace(/(<\/f>)<v>[^<]*<\/v>/g, '$1'));
+      }
+      execFileSync('zip', ['-q', '-r', '-X', path.join(work, 'nocache.xlsx'), '.'], { cwd: path.join(work, 'x') });
+      execFileSync('soffice', ['--headless', '--convert-to', 'csv', '--outdir', work, path.join(work, 'nocache.xlsx')], { stdio: 'ignore', timeout: 120000 });
+      const csvRows = fs.readFileSync(path.join(work, 'nocache.csv'), 'utf8').split('\n').map((l) => l.split(','));
+      const lo = Object.fromEntries(csvRows.filter((c) => / balance$/.test(c[0])).map((c) => [c[0].replace(/: balance$/, ''), parseFloat(c[1])]));
+      const want = rep.find((x) => x.p === maple).app;
+      ok(Object.keys(want).length > 0 && Object.entries(want).every(([k, v]) => Math.abs((lo[k] || 0) - v) < 0.02), `LibreOffice recalculates the same balances: ${JSON.stringify(lo)} vs app ${JSON.stringify(want)}`);
+      const net = csvRows.find((c) => c[0] === 'Net profit');
+      const appNet = await ev((m) => { const tx = S.txns.filter((t) => t.propertyId === m); return r2(sum(tx.filter((t) => t.kind === 'income' || t.kind === 'deposit_apply'), (t) => t.amount) - sum(tx.filter((t) => t.kind === 'expense'), (t) => t.amount)); }, maple);
+      ok(net && Math.abs(parseFloat(net[1]) - appNet) < 0.02, `net profit formula = app (${net && net[1]} vs ${appNet})`);
+      ok(csvRows.some((c) => c[0] === 'Check' && Math.abs(parseFloat(c[1])) < 0.02), 'check row: balances add up to 0');
+    } else console.log('  (LibreOffice not installed — skipped the recalculation check)');
+    await ev(async () => { for (const id of ['rp1', 'rp2', 'rp3']) await remove('txns', id); });
 
     section('Personal money between partners is kept separate');
     const snap = () => ev(() => JSON.stringify({ pos: partnerPositions(S.txns).pos, acc: S.accounts.map((a) => accountBalance(a.id)), pl: plData(today().slice(0, 4), '').net }));

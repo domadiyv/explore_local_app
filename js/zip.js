@@ -140,8 +140,20 @@ const Xlsx = (() => {
   }
 
   // style ids: 0 normal, 1 header, 2 date, 3 money, 4 bold money, 5 bold text
+  // style ids: 6 percent, 7 bold percent. A value of { f, v } is a formula with its pre-computed result
+  // (so viewers that don't recalculate, like iPhone previews, still show the number).
+  const STYLE = { money: [3, 4], number: [0, 5], percent: [6, 7] };
   function cell(ref, value, type, bold) {
     if (value === null || value === undefined || value === '') return '';
+    if (typeof value === 'object' && value.f) {
+      const f = `<f>${xmlEsc(value.f)}</f>`;
+      if (typeof value.v === 'number' && isFinite(value.v)) return `<c r="${ref}" s="${(STYLE[type] || [0, 5])[bold ? 1 : 0]}">${f}<v>${value.v}</v></c>`;
+      return `<c r="${ref}" t="str"${bold ? ' s="5"' : ''}>${f}<v>${xmlEsc(value.v ?? '')}</v></c>`;
+    }
+    if (type === 'percent') {
+      const n = Number(value);
+      return isFinite(n) ? `<c r="${ref}" s="${bold ? 7 : 6}"><v>${n}</v></c>` : '';
+    }
     if (type === 'money' || type === 'number') {
       const n = Number(value);
       if (!isFinite(n)) return '';
@@ -218,13 +230,15 @@ const Xlsx = (() => {
 <fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFDDEBF7"/><bgColor indexed="64"/></patternFill></fill></fills>
 <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
 <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-<cellXfs count="6">
+<cellXfs count="8">
 <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
 <xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/>
 <xf numFmtId="165" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
 <xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
 <xf numFmtId="164" fontId="1" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1"/>
 <xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>
+<xf numFmtId="10" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
+<xf numFmtId="10" fontId="1" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1"/>
 </cellXfs>
 <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
 </styleSheet>`;

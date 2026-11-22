@@ -25,7 +25,8 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 9);
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+// Round to cents, halves away from zero (like Excel), so −1105.665 and +1105.665 become −1105.67 and +1105.67.
+const r2 = (n) => { const x = Number(n) || 0; return (Math.sign(x) * Math.round(Number((Math.abs(x) * 100).toPrecision(15)))) / 100 || 0; };
 const sum = (arr, f = (x) => x) => r2(arr.reduce((a, x) => a + (Number(f(x)) || 0), 0));
 const pad2 = (n) => String(n).padStart(2, '0');
 const ymd = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
@@ -1866,7 +1867,7 @@ V.partners = (sub, q) => {
   ];
   return {
     title: 'Partners', back: '#/more',
-    actions: [{ label: '+ Partner', act: 'newPartner' }],
+    actions: [{ label: 'Excel', act: 'partnerReport' }, { label: '+ Partner', act: 'newPartner' }],
     html: `${partnerScopeSelect(p)}
       <h2>Who owes whom</h2>
       <div class="list">${ids.length ? ids.map((id) => { const v = pos[id] || 0; return `<div class="row"><div class="grow"><div class="t">${esc(partnerName(id))}${p && !owners.includes(id) ? ' <span class="chip warn-owner">not an owner</span>' : ''}</div></div><div class="r amt ${v > 0.005 ? 'pos' : v < -0.005 ? 'neg' : ''}">${v > 0.005 ? 'is owed ' + money(v) : v < -0.005 ? 'owes ' + money(-v) : 'settled ✓'}</div></div>`; }).join('') : '<div class="empty">No partner activity yet</div>'}</div>
@@ -2081,7 +2082,8 @@ V.data = () => ({
   title: 'Export & backup', back: '#/more',
   html: `<h2>Excel</h2>
     <div class="card pad"><div class="small muted" style="margin-bottom:10px">One .xlsx workbook with sheets for summary, properties, units, tenants, leases, the full ledger (with each partner's split), partner balances, accounts, rent roll and yearly P&amp;L. Opens in Excel, Numbers and Google Sheets.</div>
-      <button class="btn block" data-act="exportAll">Export everything to Excel</button></div>
+      <button class="btn block" data-act="exportAll">Export everything to Excel</button>
+      <button class="btn sec block" style="margin-top:8px" data-act="partnerReport">Excel for your partner (with the calculation)</button></div>
     <h2>Import</h2>
     <div class="card pad"><div class="small muted" style="margin-bottom:10px">Add many past transactions at once from an Excel template with dropdown lists, or from your own spreadsheet / bank export (CSV).</div>
       <a class="btn sec block" href="#/import">Import transactions…</a></div>
@@ -2310,6 +2312,127 @@ async function exportAll() {
   const blob = await Xlsx.build(buildWorkbookSheets());
   offerFile(blob, `EstateLedger_${today()}.xlsx`);
 }
+// ---------------------------------------------------------------- partner report (Excel with formulas)
+/* A workbook a partner can follow by hand. For every entry and partner:
+     Personal = money that partner put in himself (+: paid a bill, put money in, paid a settlement)
+                or took / kept himself (−: kept rent, took money out, received a settlement)
+     Effect   = Personal − Share% × (sum of all partners' Personal on that row)
+   Summed over all entries this is exactly the app's "who owes whom" (partnerPositions). */
+function partnerReportSheets(propertyId) {
+  const tx = S.txns.filter((t) => t.kind !== 'personal' && (!propertyId || t.propertyId === propertyId)).sort((a, b) => a.date.localeCompare(b.date) || (a.createdAt || '').localeCompare(b.createdAt || ''));
+  const SHARED = ['income', 'expense', 'deposit_in', 'deposit_out', 'deposit_apply', 'contribution', 'withdrawal'];
+  const rowsData = tx.map((t) => {
+    const { cash, cap, shares } = effects(t);
+    const a = r2(t.amount);
+    const personal = {};
+    for (const [pid, v] of Object.entries(cap)) {
+      const sh = (shares[pid] || 0) * a;
+      personal[pid] = r2(isIn(t) ? v - sh : isOut(t) ? v + sh : v);
+    }
+    const pl = t.kind === 'income' || t.kind === 'deposit_apply' ? a : t.kind === 'expense' ? -a : 0;
+    return { t, personal, shares: SHARED.includes(t.kind) ? shares : {}, pl, cash: r2(Object.values(cash).reduce((x, y) => x + y, 0)) };
+  });
+  const owners = propertyId ? ownerIds(propertyId) : [];
+  const ids = S.partners.map((p) => p.id).filter((id) => owners.includes(id) || rowsData.some((r) => r.personal[id] || r.shares[id]));
+  const C = Xlsx.colName;
+  const n = rowsData.length, first = 2, last = n + 1, tot = n + 2;
+  const base = ['Date', 'Property', 'Type', 'Category', 'Description', 'Amount', 'Paid from / received into', 'Common account change', 'Profit & loss'];
+  const pc = (i, k) => base.length + i * 3 + k; // partner i: 0 personal, 1 share %, 2 effect
+  const columns = [
+    { header: 'Date', type: 'date', width: 11 }, { header: 'Property', width: 16 }, { header: 'Type', width: 14 }, { header: 'Category', width: 20 }, { header: 'Description', width: 34 },
+    { header: 'Amount', type: 'money', width: 12 }, { header: 'Paid from / received into', width: 24 }, { header: 'Common account change', type: 'money', width: 14 }, { header: 'Profit & loss', type: 'money', width: 13 },
+    ...ids.flatMap((id) => [{ header: `${partnerName(id)}: paid (+) / kept (−) personally`, type: 'money', width: 18 }, { header: `${partnerName(id)}: share %`, type: 'percent', width: 11 }, { header: `${partnerName(id)}: effect on balance`, type: 'money', width: 16 }]),
+  ];
+  const rows = rowsData.map((r, ri) => {
+    const row = ri + first;
+    const sumPersonal = ids.map((_, i) => `${C(pc(i, 0))}${row}`).join('+');
+    const totalP = ids.reduce((s, id) => s + (r.personal[id] || 0), 0);
+    return [
+      r.t.date, propName(r.t.propertyId), KINDS[r.t.kind].short, r.t.category, [txnTitle(r.t) !== r.t.category ? txnTitle(r.t) : '', r.t.description].filter(Boolean).join(' — '),
+      r.t.amount, viaLabel(r.t.via) || (r.t.accountId ? accountName(r.t.accountId) + (r.t.toAccountId ? ' → ' + accountName(r.t.toAccountId) : '') : ''), r.cash || '', r.pl || '',
+      ...ids.flatMap((id, i) => {
+        const eff = r2((r.personal[id] || 0) - (r.shares[id] || 0) * totalP);
+        return [r.personal[id] || 0, r.shares[id] ?? '', { f: `${C(pc(i, 0))}${row}-${C(pc(i, 1))}${row}*(${sumPersonal})`, v: eff }];
+      }),
+    ];
+  });
+  const colSum = (ci, v) => ({ f: `SUM(${C(ci)}${first}:${C(ci)}${Math.max(first, last)})`, v: r2(v) });
+  const totPersonal = (id) => sum(rowsData, (r) => r.personal[id] || 0);
+  // round only the total (like Excel and the app), not every row
+  const totEffect = (id) => r2(rowsData.reduce((acc, r) => acc + (r.personal[id] || 0) - (r.shares[id] || 0) * ids.reduce((s, x) => s + (r.personal[x] || 0), 0), 0));
+  rows.push({ bold: true, cells: ['', 'TOTAL', '', '', '', '', '', colSum(7, sum(rowsData, (r) => r.cash)), colSum(8, sum(rowsData, (r) => r.pl)),
+    ...ids.flatMap((id, i) => [colSum(pc(i, 0), totPersonal(id)), '', colSum(pc(i, 2), totEffect(id))])] });
+
+  // Summary: every number is a formula over the Entries sheet
+  const E = (ci) => `Entries!${C(ci)}${first}:${C(ci)}${Math.max(first, last)}`;
+  const income = sum(rowsData.filter((r) => r.pl > 0), (r) => r.pl), expense = -sum(rowsData.filter((r) => r.pl < 0), (r) => r.pl);
+  const sRows = [];
+  const add = (label, value, note = '', bold = false) => sRows.push(bold ? { bold: true, cells: [label, value, note] } : [label, value, note]);
+  const pos = Object.fromEntries(ids.map((id) => [id, totEffect(id)]));
+  add('Partner report', '', propertyId ? propName(propertyId) : 'All properties', true);
+  add('Created', '', fmtDate(today()));
+  if (cutoff()) add('All transactions recorded through', '', fmtDate(cutoff()));
+  if (propertyId) add('Owners', '', (byId('properties', propertyId).owners || []).map((o) => `${partnerName(o.partnerId)} ${o.pct}%`).join(', '));
+  add('', '', '');
+  add('PROFIT', '', '', true);
+  add('Total income', { f: `SUMIF(${E(8)},">0")`, v: income }, 'Rent and other income (deposits are not income until kept)');
+  add('Total expenses', { f: `-SUMIF(${E(8)},"<0")`, v: expense }, 'All property expenses');
+  add('Net profit', { f: `SUM(${E(8)})`, v: r2(income - expense) }, 'Income − expenses', true);
+  for (const [i, id] of ids.entries()) add(`${partnerName(id)}'s share of profit`, { f: `SUMPRODUCT(${E(8)},${E(pc(i, 1))})`, v: sum(rowsData, (r) => r.pl * (r.shares[id] || 0)) }, 'Profit of each entry × his share %');
+  add('', '', '');
+  add('WHO OWES WHOM', '', '', true);
+  const balRow0 = sRows.length + 2;
+  for (const [i, id] of ids.entries()) {
+    add(`${partnerName(id)}: paid (+) / kept (−) personally`, { f: `SUM(${E(pc(i, 0))})`, v: totPersonal(id) }, 'Bills he paid + money he put in − rent he kept − money he took out (± settlements)');
+  }
+  for (const [i, id] of ids.entries()) {
+    const r = sRows.length + 2;
+    const v = r2(pos[id] || 0);
+    add(`${partnerName(id)}: balance`, { f: `SUM(${E(pc(i, 2))})`, v }, { f: `IF(B${r}>0.005,"is owed this amount",IF(B${r}<-0.005,"owes this amount","settled"))`, v: v > 0.005 ? 'is owed this amount' : v < -0.005 ? 'owes this amount' : 'settled' }, true);
+  }
+  const plan = settlePlan(pos);
+  add('', '', '');
+  if (plan.length) for (const x of plan) add('To settle', x.amount, `${partnerName(x.from)} pays ${partnerName(x.to)}`, true);
+  else add('To settle', '', 'Nothing — everyone is settled');
+  add('', '', '');
+  add('Check', { f: `ROUND(SUM(B${balRow0 + ids.length}:B${balRow0 + 2 * ids.length - 1}),2)`, v: 0 }, 'Balances always add up to 0');
+
+  const how = [
+    ['How to read this workbook'],
+    [''],
+    ['1. Entries sheet: one row per transaction. Click any blue-total or “effect” cell to see its formula.'],
+    ['2. “Paid (+) / kept (−) personally” is money a partner handled with his OWN pocket:'],
+    ['     + paid a property bill himself, put money into the common account, or paid the other partner'],
+    ['     − kept rent / income himself, took money out of the common account, or received a payment from the other partner'],
+    ['   Money that went through the common account (rent deposited, mortgage paid from the account) is 0 for everybody — it belongs to all owners.'],
+    ['3. “Share %” is the partner\'s ownership of that entry (the property owners\' % unless a custom split was used).'],
+    ['4. Effect on balance = his “paid/kept” − his share % × (everyone\'s “paid/kept” on that row).'],
+    ['     Example: rent of 2,000 kept by A (A −2,000), owners 50/50 → A: −2,000 − 50% × −2,000 = −1,000 (A owes 1,000); B: 0 − 50% × −2,000 = +1,000 (B is owed 1,000).'],
+    ['5. Summary: each partner\'s balance is the sum of his “effect” column. + means the others owe him; − means he owes the others.'],
+    ['6. Profit & loss: income +, expenses −. Each partner\'s share of profit = each entry\'s profit × his share %.'],
+    ['   Security deposits are not income (they are owed back to the tenant) unless kept for damages / unpaid rent.'],
+    ['7. Personal money between partners (not property related) is kept separately and is not part of this report.'],
+  ];
+  return [
+    { name: 'Summary', columns: [{ header: 'Item', width: 40 }, { header: 'Amount', type: 'money', width: 16 }, { header: 'What it means', width: 70 }], rows: sRows, noFilter: true },
+    { name: 'Entries', columns, rows },
+    { name: 'How it works', columns: [{ header: 'Explanation', width: 140 }], rows: how, noFilter: true },
+  ];
+}
+async function exportPartnerReport(propertyId) {
+  const blob = await Xlsx.build(partnerReportSheets(propertyId));
+  const name = (propertyId ? propName(propertyId) : 'All properties').replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '_');
+  offerFile(blob, `Partner_report_${name}_${today()}.xlsx`, null, 'Every total is an Excel formula your partner can click to check.');
+}
+function partnerReportForm(preset) {
+  openSheet('Excel for your partner', `<form class="form" id="f">
+    <div class="hint" style="margin:0 2px 12px">A workbook your partner can follow without the app: a summary (profit, each partner's share, who owes whom), every entry with each partner's part, and a sheet explaining the calculation. All totals are Excel formulas.</div>
+    ${field('Property', `<select name="p">${propertyOptions(preset || (S.properties.length === 1 ? S.properties[0].id : ''), 'All properties')}</select>`)}
+    <button class="btn block">Create Excel file</button>
+  </form>`, (b) => {
+    $('#f', b).onsubmit = (e) => { e.preventDefault(); const p = readForm(b).p; closeSheet(); exportPartnerReport(p).catch((err) => alert('Export failed: ' + err.message)); };
+  });
+}
 async function exportLedger() {
   const q = new URLSearchParams(location.hash.split('?')[1] || '');
   const { list } = ledgerFilter(q);
@@ -2437,6 +2560,7 @@ const ACTIONS = {
   uploadDoc: (d) => uploadDocForm(d.linkType || 'general', d.id),
   exportAll: () => exportAll().catch((e) => alert('Export failed: ' + e.message)),
   exportLedger: () => exportLedger().catch((e) => alert('Export failed: ' + e.message)),
+  partnerReport: (d) => partnerReportForm(d.id || new URLSearchParams(location.hash.split('?')[1] || '').get('p') || ''),
   backup: () => backup(true).catch((e) => alert('Backup failed: ' + e.message)),
   backupLite: () => backup(false).catch((e) => alert('Backup failed: ' + e.message)),
   setCutoff: () => cutoffForm(),
